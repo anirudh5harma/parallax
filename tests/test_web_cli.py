@@ -12,6 +12,17 @@ from deep_research.web_sessions import ResearchSessionService
 
 
 class WebCliTests(unittest.TestCase):
+    def test_defaults_to_serious_web_profile(self) -> None:
+        with patch("deep_research.web_cli.uvicorn.run") as run:
+            result = main([])
+
+        config = run.call_args.args[0].state.sessions.config
+        self.assertEqual(0, result)
+        self.assertEqual(80, config.max_searches)
+        self.assertEqual(200, config.max_pages)
+        self.assertEqual(10, config.max_concurrent_fetches)
+        self.assertEqual(900, config.wall_clock_timeout_seconds)
+
     def test_forwards_bounded_budget_controls(self) -> None:
         with patch("deep_research.web_cli.uvicorn.run") as run:
             result = main([

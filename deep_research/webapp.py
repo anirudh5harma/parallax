@@ -47,6 +47,13 @@ class AnonymousWorkspaceQuota:
                 )
             self._counts[key] += 1
 
+    def refund(self, workspace_id: str, action: str) -> None:
+        day = datetime.now(UTC).date().isoformat()
+        key = (day, workspace_id, action)
+        with self._lock:
+            if self._counts[key] > 0:
+                self._counts[key] -= 1
+
 
 def _workspace_id(value: str) -> str:
     normalized = value.strip().lower()
@@ -110,6 +117,12 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
                     return PlainTextResponse("request body too large", status_code=413)
             except ValueError:
                 return PlainTextResponse("invalid content length", status_code=400)
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_REQUEST_BYTES:
+                return PlainTextResponse("request body too large", status_code=413)
+            body.extend(chunk)
+        request._body = bytes(body)
         origin = request.headers.get("origin")
         if origin is not None and origin not in allowed_origins:
             return PlainTextResponse("forbidden origin", status_code=403)
@@ -145,7 +158,11 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
         try:
             workspace_id = _workspace_id(x_workspace_key)
             quota.reserve(workspace_id, "plan")
-            session = sessions.create(request.query, workspace_id=workspace_id)
+            try:
+                session = sessions.create(request.query, workspace_id=workspace_id)
+            except Exception:
+                quota.refund(workspace_id, "plan")
+                raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except ValueError as exc:
@@ -163,7 +180,11 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
         try:
             workspace_id = _workspace_id(x_workspace_key)
             quota.reserve(workspace_id, "run")
-            return sessions.start(session_id, workspace_id=workspace_id).summary()
+            try:
+                return sessions.start(session_id, workspace_id=workspace_id).summary()
+            except Exception:
+                quota.refund(workspace_id, "run")
+                raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except KeyError as exc:
@@ -196,11 +217,15 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
         try:
             workspace_id = _workspace_id(x_workspace_key)
             quota.reserve(workspace_id, "branch")
-            session = sessions.create_branch(
-                session_id,
-                request.observation_id,
-                workspace_id=workspace_id,
-            )
+            try:
+                session = sessions.create_branch(
+                    session_id,
+                    request.observation_id,
+                    workspace_id=workspace_id,
+                )
+            except Exception:
+                quota.refund(workspace_id, "branch")
+                raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except KeyError as exc:

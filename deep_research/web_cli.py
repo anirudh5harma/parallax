@@ -12,16 +12,25 @@ from .webapp import create_app
 
 
 def main(argv: list[str] | None = None) -> int:
+    serious = BudgetConfig.serious()
     parser = argparse.ArgumentParser(
         prog="deep-research-api",
         description="Local Parallax research API.",
     )
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
-    parser.add_argument("--max-searches", type=int, default=24)
-    parser.add_argument("--max-pages", type=int, default=40)
-    parser.add_argument("--max-concurrent-fetches", type=int, default=8)
-    parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument("--max-searches", type=int, default=serious.max_searches)
+    parser.add_argument("--max-pages", type=int, default=serious.max_pages)
+    parser.add_argument(
+        "--max-concurrent-fetches",
+        type=int,
+        default=serious.max_concurrent_fetches,
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=serious.wall_clock_timeout_seconds,
+    )
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")

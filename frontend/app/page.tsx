@@ -32,10 +32,14 @@ function cleanReport(report: string, evidence: EvidenceClaim[]) {
       continue;
     }
     if (citations.length && line.trim() && !line.startsWith('#')) {
-      const pills = citations.map((sourceId) => claimId
+      const citedInline = new Set(line.match(/S\d+/g) ?? []);
+      const linkedLine = claimId
+        ? line.replace(/\b(S\d+)\b/g, (sourceId) => citations.includes(sourceId) ? `[${sourceId}](#evidence-${claimId}-${sourceId})` : sourceId)
+        : line;
+      const pills = citations.filter((sourceId) => !citedInline.has(sourceId)).map((sourceId) => claimId
         ? `[${sourceId}](#evidence-${claimId}-${sourceId})`
         : sourceId).join(' ');
-      output.push(`${line} ${pills}`);
+      output.push(pills ? `${linkedLine} ${pills}` : linkedLine);
       citations = [];
       continue;
     }

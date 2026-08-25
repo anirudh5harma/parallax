@@ -90,6 +90,28 @@ class ResearchSessionServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "control characters"):
             service.create("A valid-looking query\x00with a null byte")
 
+    def test_unpaired_surrogate_is_rejected_before_worker_start(self) -> None:
+        service = ResearchSessionService(auto_start=False)
+
+        with self.assertRaisesRegex(ValueError, "valid UTF-8"):
+            service.create("A valid-looking query\ud800with a surrogate")
+
+    def test_retention_promotes_children_of_evicted_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), auto_start=False, max_retained_sessions=2
+            )
+            parent = service.create("Parent research")
+            parent.status = "completed"
+            child = service.create("Child research", parent_session_id=parent.id)
+            child.status = "completed"
+
+            service.create("Newest research")
+
+        self.assertIsNone(child.parent_session_id)
+        self.assertNotIn(parent.id, [item["id"] for item in service.list_sessions()])
+        self.assertIn(child.id, [item["id"] for item in service.list_sessions()])
+
     def test_start_rechecks_active_capacity_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(

@@ -113,12 +113,16 @@ class LocalApiBoundaryTests(unittest.TestCase):
 
             with patch("deep_research.web_sessions.threading.Thread"):
                 service.start(first.id, workspace_id=WORKSPACE_A)
-                response = client.post(
-                    f"/api/sessions/{second.id}/start",
-                    headers={"X-Workspace-Key": WORKSPACE_A},
-                )
+                responses = [
+                    client.post(
+                        f"/api/sessions/{second.id}/start",
+                        headers={"X-Workspace-Key": WORKSPACE_A},
+                    )
+                    for _ in range(6)
+                ]
 
-        self.assertEqual(429, response.status_code)
+        self.assertTrue(all(response.status_code == 429 for response in responses))
+        self.assertTrue(all("active research capacity" in response.text for response in responses))
 
     def test_daily_anonymous_quota_fails_closed(self) -> None:
         quota = AnonymousWorkspaceQuota()
@@ -132,6 +136,17 @@ class LocalApiBoundaryTests(unittest.TestCase):
         client = TestClient(create_app(ResearchSessionService(auto_start=False)))
 
         response = client.get("/api/health", headers={"Content-Length": "20000"})
+
+        self.assertEqual(413, response.status_code)
+
+    def test_headerless_streamed_body_is_size_limited(self) -> None:
+        client = TestClient(create_app(ResearchSessionService(auto_start=False)))
+
+        response = client.post(
+            "/api/sessions",
+            headers={"X-Workspace-Key": WORKSPACE_A},
+            content=iter([b"x" * 9_000, b"y" * 9_000]),
+        )
 
         self.assertEqual(413, response.status_code)
 

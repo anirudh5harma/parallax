@@ -108,7 +108,9 @@ class CriticSynthesizerTests(unittest.TestCase):
                 remaining_gaps=["Primary studies were not recovered."],
             )
 
-        self.assertIn("remains insufficient", report)
+        self.assertIn("Available evidence is insufficient", report)
+        self.assertNotIn("No page", report)
+        self.assertNotIn("run", report.casefold())
         self.assertIn("Primary studies were not recovered.", report)
         self.assertIn("No sources cited", report)
 

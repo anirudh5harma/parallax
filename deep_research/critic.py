@@ -254,9 +254,8 @@ class CriticSynthesizer:
         if not claims:
             payload: dict[str, object] = {
                 "executive_summary": (
-                    "No page produced clear, on-topic evidence strong enough to support "
-                    "a finding. The run therefore remains insufficient rather than "
-                    "inventing a narrative."
+                    "Available evidence is insufficient to support a reliable answer. "
+                    "No clear, on-topic finding can be stated without speculation."
                 ),
                 "main_findings": [],
                 "contested_findings": [],
@@ -279,13 +278,11 @@ class CriticSynthesizer:
             "or finding synthesis, never in the executive summary. Every claim whose "
             "disagreement field is true must appear only in contested_findings; claims whose "
             "disagreement field is false must never appear there. Never create numeric "
-            "confidence scores."
+            "confidence scores. Answer the original query directly. Never narrate the research "
+            "process, tasks, searches, pages, tools, models, ledger construction, or run quality."
         )
         report_input = {
             "original_query": original_query,
-            "planner_tasks": [
-                {"id": task.id, "question": task.question} for task in tasks
-            ],
             "structured_claims": context.packet,
             "remaining_gaps": remaining_gaps,
         }

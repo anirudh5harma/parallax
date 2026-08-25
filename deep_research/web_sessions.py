@@ -284,9 +284,13 @@ class ResearchSessionService:
         parent_session_id: str | None = None,
         branch: dict[str, str] | None = None,
     ) -> ResearchSession:
+        try:
+            query.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("research query must be valid UTF-8 text") from exc
         if any(
-            unicodedata.category(character) == "Cc"
-            and character not in {"\t", "\n", "\r"}
+            unicodedata.category(character) in {"Cc", "Cs"}
+            and (unicodedata.category(character) != "Cc" or character not in {"\t", "\n", "\r"})
             for character in query
         ):
             raise ValueError("research query contains unsupported control characters")
@@ -324,7 +328,12 @@ class ResearchSessionService:
                 )
                 if not terminal:
                     raise SessionCapacityError("session retention capacity reached")
-                self._sessions.pop(terminal[0].id, None)
+                evicted = terminal[0]
+                self._sessions.pop(evicted.id, None)
+                for child in self._sessions.values():
+                    if child.parent_session_id == evicted.id:
+                        with child.lock:
+                            child.parent_session_id = None
             self._sessions[session.id] = session
         if self.auto_start:
             threading.Thread(
