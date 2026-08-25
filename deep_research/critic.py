@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
 from .audit import JsonlAuditLogger
@@ -98,6 +99,20 @@ REPORT_SCHEMA: dict[str, Any] = {
     ],
     "additionalProperties": False,
 }
+
+
+def _report_schema(
+    claim_ids: list[str],
+    source_ids: list[str],
+) -> dict[str, Any]:
+    schema = deepcopy(REPORT_SCHEMA)
+    for section in ("main_findings", "contested_findings", "weak_evidence"):
+        properties = schema["properties"][section]["items"]["properties"]
+        if claim_ids:
+            properties["claim_id"]["enum"] = claim_ids
+        if source_ids:
+            properties["source_ids"]["items"]["enum"] = source_ids
+    return schema
 
 
 class CriticSynthesizer:
@@ -248,7 +263,10 @@ class CriticSynthesizer:
                 ensure_ascii=False,
             ),
             schema_name="final_report",
-            schema=REPORT_SCHEMA,
+            schema=_report_schema(
+                sorted(context.claims_by_id),
+                sorted(context.source_urls, key=lambda item: int(item[1:])),
+            ),
             timeout_seconds=self.budget.remaining_seconds(),
         )
         report = render_report(payload, context, remaining_gaps=remaining_gaps)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from deep_research.audit import JsonlAuditLogger
 from deep_research.budget import BudgetConfig, BudgetManager
-from deep_research.critic import CriticSynthesizer
+from deep_research.critic import CriticSynthesizer, _report_schema
 from deep_research.ledger import EvidenceLedger
 from deep_research.models import (
     EvidenceObservation,
@@ -27,6 +27,13 @@ def task(task_id: str = "T1") -> ResearchTask:
 
 
 class CriticSynthesizerTests(unittest.TestCase):
+    def test_report_schema_constrains_ledger_identifiers(self) -> None:
+        schema = _report_schema(["C1", "C2"], ["S1", "S2"])
+        for section in ("main_findings", "contested_findings", "weak_evidence"):
+            properties = schema["properties"][section]["items"]["properties"]
+            self.assertEqual(["C1", "C2"], properties["claim_id"]["enum"])
+            self.assertEqual(["S1", "S2"], properties["source_ids"]["items"]["enum"])
+
     def test_critic_creates_at_most_two_depth_one_followups(self) -> None:
         model = FakeModel(
             {
