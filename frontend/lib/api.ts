@@ -71,6 +71,25 @@ export type SessionDetail = SessionSummary & {
   run: Record<string, unknown> | null;
 };
 
+let cachedWorkspaceKey: string | null = null;
+
+export function workspaceKey() {
+  if (cachedWorkspaceKey) return cachedWorkspaceKey;
+  if (typeof window === 'undefined') return 'server-render-placeholder-key-0000';
+  const stored = window.localStorage.getItem('parallax-workspace-key');
+  if (stored && /^[a-z0-9_-]{32,128}$/i.test(stored)) {
+    cachedWorkspaceKey = stored;
+    return stored;
+  }
+  cachedWorkspaceKey = window.crypto.randomUUID().replaceAll('-', '');
+  window.localStorage.setItem('parallax-workspace-key', cachedWorkspaceKey);
+  return cachedWorkspaceKey;
+}
+
+export function eventStreamUrl(sessionId: string) {
+  return `${API_BASE}/api/sessions/${sessionId}/events?workspace=${encodeURIComponent(workspaceKey())}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method ?? 'GET';
   const url = method === 'GET'
@@ -78,7 +97,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     : `${API_BASE}${path}`;
   const response = await fetch(url, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Workspace-Key': workspaceKey(),
+      ...init?.headers,
+    },
   });
   if (!response.ok) {
     const payload: unknown = await response.json().catch(() => ({}));

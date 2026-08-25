@@ -5,8 +5,12 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from deep_research.web_sessions import ResearchSessionService
-from deep_research.webapp import create_app
+from deep_research.web_sessions import ResearchSessionService, SessionCapacityError
+from deep_research.webapp import AnonymousWorkspaceQuota, create_app
+
+
+WORKSPACE_A = "a" * 32
+WORKSPACE_B = "b" * 32
 
 
 class LocalApiBoundaryTests(unittest.TestCase):
@@ -59,6 +63,77 @@ class LocalApiBoundaryTests(unittest.TestCase):
         with patch.dict("os.environ", {"WEB_ALLOWED_ORIGINS": "*"}):
             with self.assertRaisesRegex(ValueError, "explicit values"):
                 create_app(ResearchSessionService(auto_start=False))
+
+    def test_anonymous_workspaces_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {
+                "AWS_BEARER_TOKEN_BEDROCK": "key",
+                "TAVILY_API_KEY": "key",
+            },
+            clear=False,
+        ):
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            client = TestClient(create_app(service))
+            first = client.post(
+                "/api/sessions",
+                headers={"X-Workspace-Key": WORKSPACE_A},
+                json={"query": "First bounded research question"},
+            ).json()
+            service.get(first["id"]).mark_ready(
+                [{"id": f"T{index}"} for index in range(1, 5)]
+            )
+            second = client.post(
+                "/api/sessions",
+                headers={"X-Workspace-Key": WORKSPACE_B},
+                json={"query": "Second bounded research question"},
+            ).json()
+
+            listed = client.get(
+                "/api/sessions", headers={"X-Workspace-Key": WORKSPACE_A}
+            )
+            hidden = client.get(
+                f"/api/sessions/{second['id']}",
+                headers={"X-Workspace-Key": WORKSPACE_A},
+            )
+
+        self.assertEqual([first["id"]], [item["id"] for item in listed.json()])
+        self.assertEqual(404, hidden.status_code)
+
+    def test_start_capacity_returns_429(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), auto_start=False, max_active_sessions=1
+            )
+            first = service.create("First bounded query", workspace_id=WORKSPACE_A)
+            first.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+            second = service.create("Second bounded query", workspace_id=WORKSPACE_A)
+            second.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+            client = TestClient(create_app(service))
+
+            with patch("deep_research.web_sessions.threading.Thread"):
+                service.start(first.id, workspace_id=WORKSPACE_A)
+                response = client.post(
+                    f"/api/sessions/{second.id}/start",
+                    headers={"X-Workspace-Key": WORKSPACE_A},
+                )
+
+        self.assertEqual(429, response.status_code)
+
+    def test_daily_anonymous_quota_fails_closed(self) -> None:
+        quota = AnonymousWorkspaceQuota()
+        for _ in range(10):
+            quota.reserve(WORKSPACE_A, "plan")
+
+        with self.assertRaisesRegex(SessionCapacityError, "daily anonymous plan quota"):
+            quota.reserve(WORKSPACE_A, "plan")
+
+    def test_oversized_request_is_rejected_before_parsing(self) -> None:
+        client = TestClient(create_app(ResearchSessionService(auto_start=False)))
+
+        response = client.get("/api/health", headers={"Content-Length": "20000"})
+
+        self.assertEqual(413, response.status_code)
 
 
 if __name__ == "__main__":

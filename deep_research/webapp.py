@@ -3,14 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
+from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
+from .budget import BudgetConfig
 from .web_sessions import (
     ResearchSessionService,
     SessionCapacityError,
@@ -20,6 +24,37 @@ from .web_sessions import (
 
 DEFAULT_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
 DEFAULT_HOSTS = {"localhost", "127.0.0.1", "testserver"}
+MAX_REQUEST_BYTES = 16_384
+WORKSPACE_LIMITS = {"plan": 10, "run": 5, "branch": 5}
+
+
+class AnonymousWorkspaceQuota:
+    def __init__(self) -> None:
+        self._counts: dict[tuple[str, str, str], int] = defaultdict(int)
+        self._day: str | None = None
+        self._lock = threading.Lock()
+
+    def reserve(self, workspace_id: str, action: str) -> None:
+        day = datetime.now(UTC).date().isoformat()
+        key = (day, workspace_id, action)
+        with self._lock:
+            if self._day != day:
+                self._counts.clear()
+                self._day = day
+            if self._counts[key] >= WORKSPACE_LIMITS[action]:
+                raise SessionCapacityError(
+                    f"daily anonymous {action} quota reached for this workspace"
+                )
+            self._counts[key] += 1
+
+
+def _workspace_id(value: str) -> str:
+    normalized = value.strip().lower()
+    if not 32 <= len(normalized) <= 128 or not all(
+        character.isalnum() or character in {"-", "_"} for character in normalized
+    ):
+        raise HTTPException(status_code=422, detail="invalid anonymous workspace key")
+    return normalized
 
 
 def _environment_set(name: str, defaults: set[str]) -> set[str]:
@@ -43,7 +78,9 @@ class BranchRequest(BaseModel):
 def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     sessions = service or ResearchSessionService(
         output_root=Path("runs/web"),
+        config=BudgetConfig.serious(),
     )
+    quota = AnonymousWorkspaceQuota()
     allowed_origins = _environment_set("WEB_ALLOWED_ORIGINS", DEFAULT_ORIGINS)
     allowed_hosts = _environment_set("WEB_ALLOWED_HOSTS", DEFAULT_HOSTS)
     app = FastAPI(title="Parallax Research API", version="0.1.0")
@@ -56,11 +93,23 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=sorted(allowed_origins),
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "Last-Event-ID", "Cache-Control"],
+        allow_headers=[
+            "Content-Type",
+            "Last-Event-ID",
+            "Cache-Control",
+            "X-Workspace-Key",
+        ],
     )
 
     @app.middleware("http")
     async def enforce_local_origin(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > MAX_REQUEST_BYTES:
+                    return PlainTextResponse("request body too large", status_code=413)
+            except ValueError:
+                return PlainTextResponse("invalid content length", status_code=400)
         origin = request.headers.get("origin")
         if origin is not None and origin not in allowed_origins:
             return PlainTextResponse("forbidden origin", status_code=403)
@@ -78,18 +127,25 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
         }
 
     @app.get("/api/sessions")
-    def list_sessions() -> list[dict[str, object]]:
-        return sessions.list_sessions()
+    def list_sessions(
+        x_workspace_key: str = Header(alias="X-Workspace-Key"),
+    ) -> list[dict[str, object]]:
+        return sessions.list_sessions(_workspace_id(x_workspace_key))
 
     @app.post("/api/sessions", status_code=status.HTTP_202_ACCEPTED)
-    def create_session(request: ResearchRequest) -> dict[str, object]:
+    def create_session(
+        request: ResearchRequest,
+        x_workspace_key: str = Header(alias="X-Workspace-Key"),
+    ) -> dict[str, object]:
         if not sessions.configured():
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Bedrock and Tavily environment variables are required",
             )
         try:
-            session = sessions.create(request.query)
+            workspace_id = _workspace_id(x_workspace_key)
+            quota.reserve(workspace_id, "plan")
+            session = sessions.create(request.query, workspace_id=workspace_id)
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except ValueError as exc:
@@ -100,18 +156,31 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
         "/api/sessions/{session_id}/start",
         status_code=status.HTTP_202_ACCEPTED,
     )
-    def start_session(session_id: str) -> dict[str, object]:
+    def start_session(
+        session_id: str,
+        x_workspace_key: str = Header(alias="X-Workspace-Key"),
+    ) -> dict[str, object]:
         try:
-            return sessions.start(session_id).summary()
+            workspace_id = _workspace_id(x_workspace_key)
+            quota.reserve(workspace_id, "run")
+            return sessions.start(session_id, workspace_id=workspace_id).summary()
+        except SessionCapacityError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/api/sessions/{session_id}")
-    def get_session(session_id: str) -> dict[str, object]:
+    def get_session(
+        session_id: str,
+        x_workspace_key: str = Header(alias="X-Workspace-Key"),
+    ) -> dict[str, object]:
         try:
-            return sessions.get(session_id).detail()
+            return sessions.get(
+                session_id,
+                workspace_id=_workspace_id(x_workspace_key),
+            ).detail()
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
 
@@ -122,9 +191,16 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     def branch_session(
         session_id: str,
         request: BranchRequest,
+        x_workspace_key: str = Header(alias="X-Workspace-Key"),
     ) -> dict[str, object]:
         try:
-            session = sessions.create_branch(session_id, request.observation_id)
+            workspace_id = _workspace_id(x_workspace_key)
+            quota.reserve(workspace_id, "branch")
+            session = sessions.create_branch(
+                session_id,
+                request.observation_id,
+                workspace_id=workspace_id,
+            )
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except KeyError as exc:
@@ -137,9 +213,13 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     async def stream_events(
         session_id: str,
         last_event_id: str | None = Header(default=None),
+        workspace: str = Query(),
     ) -> StreamingResponse:
         try:
-            session = sessions.get(session_id)
+            session = sessions.get(
+                session_id,
+                workspace_id=_workspace_id(workspace),
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         try:

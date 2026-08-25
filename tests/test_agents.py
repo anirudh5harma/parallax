@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,79 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_accepts_five_queries_for_broad_runs(self) -> None:
+        model = FakeModel(
+            {
+                "search_queries": {
+                    "queries": [
+                        {
+                            "query_text": f"distinct query {index}",
+                            "rationale": "broader source coverage",
+                        }
+                        for index in range(5)
+                    ]
+                },
+                "page_evidence": {"observations": []},
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = BudgetManager(BudgetConfig(max_searches=5))
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=budget,
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            )
+            researcher.research(
+                ResearchTask(
+                    id="T1",
+                    question="What does broad evidence show?",
+                    rationale="Cover distinct evidence paths",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                )
+            )
+
+        self.assertEqual(5, budget.snapshot().searches)
+
+    def test_page_content_is_delimited_as_untrusted_data(self) -> None:
+        prompts: list[str] = []
+        model = FakeModel(
+            {
+                "search_queries": {
+                    "queries": [{"query_text": "query", "rationale": "coverage"}]
+                },
+                "page_evidence": lambda prompt: (
+                    prompts.append(prompt) or {"observations": []}
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([SearchResult("https://example.com/a", "A")]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig()),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            )
+            researcher.research(
+                ResearchTask(
+                    id="T1",
+                    question="Does X improve Y?",
+                    rationale="Core outcome",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                )
+            )
+
+        prompt = json.loads(prompts[0])
+        self.assertIn("untrusted_page", prompt)
+        self.assertIn("text", prompt["untrusted_page"])
     def test_deduplicates_fetches_and_rejects_nonliteral_excerpt(self) -> None:
         model = FakeModel(
             {

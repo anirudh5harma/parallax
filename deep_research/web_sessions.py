@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ class ResearchSession:
     query: str
     title: str
     created_at: str
+    workspace_id: str = "local"
     status: str = "planning"
     parent_session_id: str | None = None
     branch: dict[str, str] | None = None
@@ -248,18 +250,29 @@ class ResearchSessionService:
             and os.environ.get("TAVILY_API_KEY")
         )
 
-    def list_sessions(self) -> list[dict[str, Any]]:
+    def list_sessions(self, workspace_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
-            sessions = list(self._sessions.values())
+            sessions = [
+                item
+                for item in self._sessions.values()
+                if workspace_id is None or item.workspace_id == workspace_id
+            ]
         return [
             item.summary()
             for item in sorted(sessions, key=lambda value: value.created_at, reverse=True)
         ]
 
-    def get(self, session_id: str) -> ResearchSession:
+    def get(
+        self,
+        session_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> ResearchSession:
         with self._lock:
             session = self._sessions.get(session_id)
-        if session is None:
+        if session is None or (
+            workspace_id is not None and session.workspace_id != workspace_id
+        ):
             raise KeyError(session_id)
         return session
 
@@ -267,19 +280,27 @@ class ResearchSessionService:
         self,
         query: str,
         *,
+        workspace_id: str = "local",
         parent_session_id: str | None = None,
         branch: dict[str, str] | None = None,
     ) -> ResearchSession:
+        if any(
+            unicodedata.category(character) == "Cc"
+            and character not in {"\t", "\n", "\r"}
+            for character in query
+        ):
+            raise ValueError("research query contains unsupported control characters")
         normalized = " ".join(query.split())
         if len(normalized) < 3:
             raise ValueError("research query must contain at least 3 characters")
         if len(normalized) > 4_000:
             raise ValueError("research query must not exceed 4000 characters")
         session = ResearchSession(
-            id=uuid.uuid4().hex[:12],
+            id=uuid.uuid4().hex,
             query=normalized,
             title=_session_title(normalized, branch),
             created_at=datetime.now(UTC).isoformat(),
+            workspace_id=workspace_id,
             parent_session_id=parent_session_id,
             branch=branch,
         )
@@ -314,8 +335,13 @@ class ResearchSessionService:
             ).start()
         return session
 
-    def start(self, session_id: str) -> ResearchSession:
-        session = self.get(session_id)
+    def start(
+        self,
+        session_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> ResearchSession:
+        session = self.get(session_id, workspace_id=workspace_id)
         with self._lock, session.lock:
             if session.status != "ready":
                 raise ValueError("research plan is not ready to start")
@@ -346,8 +372,14 @@ class ResearchSessionService:
         with self._lock:
             self._sse_connections = max(0, self._sse_connections - 1)
 
-    def create_branch(self, parent_id: str, observation_id: str) -> ResearchSession:
-        parent = self.get(parent_id)
+    def create_branch(
+        self,
+        parent_id: str,
+        observation_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> ResearchSession:
+        parent = self.get(parent_id, workspace_id=workspace_id)
         with parent.lock:
             if parent.status not in {"completed", "completed_with_errors"}:
                 raise ValueError("parent research must be complete before branching")
@@ -385,6 +417,7 @@ class ResearchSessionService:
         )
         return self.create(
             branch_query,
+            workspace_id=parent.workspace_id,
             parent_session_id=parent_id,
             branch=branch,
         )
@@ -563,7 +596,10 @@ class ResearchSessionService:
                     error=final_error,
                 )
                 return
-            session.begin_report()
+            with session.lock:
+                report_started = session.status == "synthesizing"
+            if not report_started:
+                session.begin_report()
             for chunk in _chunks(report, 260):
                 session.publish("report.chunk", text=chunk)
                 time.sleep(0.025)
@@ -612,7 +648,12 @@ class ResearchSessionService:
                 except json.JSONDecodeError:
                     continue
                 public_event = _public_audit_event(record)
-                if public_event is not None:
+                if record.get("event") == "synthesis.started":
+                    with session.lock:
+                        already_started = session.status == "synthesizing"
+                    if not already_started:
+                        session.begin_report()
+                elif public_event is not None:
                     session.publish("research.progress", **public_event)
             event_offset = stream.tell()
         return event_path, event_offset
@@ -666,6 +707,7 @@ def _public_audit_event(record: dict[str, Any]) -> dict[str, Any] | None:
         "observation.extracted": "Evidence observation added to the ledger",
         "ledger.contradiction_added": "Contradicting evidence preserved in the ledger",
         "critic.followup_created": "Critic requested one bounded follow-up",
+        "synthesis.started": "Critic is writing the final evidence report",
         "synthesis.completed": "Final evidence report assembled",
     }
     message = messages.get(event)

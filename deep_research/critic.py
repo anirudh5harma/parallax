@@ -244,6 +244,12 @@ class CriticSynthesizer:
         observations: list[EvidenceObservation],
         remaining_gaps: list[str],
     ) -> str:
+        self.audit.log(
+            "synthesis.started",
+            claim_count=len(claims),
+            observation_count=len(observations),
+            budget=self.budget.snapshot(),
+        )
         context = build_synthesis_context(claims, observations)
         if not claims:
             payload: dict[str, object] = {

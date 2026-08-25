@@ -22,9 +22,9 @@ deep-research-api
 cd frontend && npm install && npm run dev
 ```
 
-Open `http://localhost:3000`. Web research defaults to Opus 4.6 through Bedrock; override with `BEDROCK_WEB_MODEL_ID`. Sessions stay in memory and support new research paths from contradicting citations.
+Open `http://localhost:3000`. Web research defaults to Opus 4.6 through Bedrock and the serious breadth profile: up to 80 searches, 200 pages, 10 concurrent fetches, and 15 minutes. Sessions stay in memory and support new research paths from contradicting citations.
 
-For deployment, use `frontend/` as the Vercel root and the repository root as a Render Blueprint. Set `NEXT_PUBLIC_RESEARCH_API_URL` on Vercel. Keep Bedrock and Tavily keys on Render, then set `WEB_ALLOWED_ORIGINS` and `WEB_ALLOWED_HOSTS` to explicit production values. Add platform rate limits before exposing the no-auth API.
+For deployment, use `frontend/` as the Vercel root and the repository root as a Render Blueprint. Set `NEXT_PUBLIC_RESEARCH_API_URL` on Vercel. Keep Bedrock and Tavily keys on Render, then set `WEB_ALLOWED_ORIGINS` and `WEB_ALLOWED_HOSTS` to explicit production values. Anonymous workspaces have in-memory daily quotas; add platform IP rate limits before public launch.
 
 Default `dev` budget: 4 primary tasks, 2 follow-ups, 24 searches, 40 pages, 8 concurrent fetches, 5-minute timeout. Larger run:
 

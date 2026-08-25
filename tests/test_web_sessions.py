@@ -73,6 +73,23 @@ class ResearchSessionServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(SessionCapacityError, "capacity"):
                 service.create("Second bounded query")
 
+    def test_workspace_scope_hides_other_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            first = service.create("First bounded query", workspace_id="a" * 32)
+            first.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+            second = service.create("Second bounded query", workspace_id="b" * 32)
+
+            self.assertEqual([first.id], [item["id"] for item in service.list_sessions("a" * 32)])
+            with self.assertRaises(KeyError):
+                service.get(second.id, workspace_id="a" * 32)
+
+    def test_control_characters_are_rejected_before_worker_start(self) -> None:
+        service = ResearchSessionService(auto_start=False)
+
+        with self.assertRaisesRegex(ValueError, "control characters"):
+            service.create("A valid-looking query\x00with a null byte")
+
     def test_start_rechecks_active_capacity_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(
