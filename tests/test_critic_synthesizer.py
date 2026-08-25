@@ -65,6 +65,36 @@ class CriticSynthesizerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "disputed claims outside"):
                 render_report(payload, context)
 
+            payload["main_findings"] = []
+            with self.assertRaisesRegex(ValueError, "missing from contested"):
+                render_report(payload, context)
+
+    def test_non_disputed_claim_cannot_render_as_contested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://support.example/a",
+                    source_domain="support.example", statement="X improves Y.",
+                    polarity=Polarity.SUPPORT, excerpt="Measured effect.",
+                )]
+            )
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            claim = ledger.claims()[0]
+            payload = {
+                "executive_summary": "Summary.", "main_findings": [],
+                "contested_findings": [{
+                    "claim_id": claim.claim_id, "synthesis": "Supported finding.",
+                    "source_ids": ["S1"],
+                }],
+                "weak_evidence": [], "remaining_gaps": [],
+            }
+
+            with self.assertRaisesRegex(ValueError, "non-disputed claims"):
+                render_report(payload, context)
+
     def test_synthesis_handles_empty_ledger_without_model_invention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")

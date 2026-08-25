@@ -1,7 +1,13 @@
+import io
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from deep_research.budget import BudgetConfig
+from deep_research.cli import _worker_timeout
 from deep_research.web_cli import main
+from deep_research.web_sessions import ResearchSessionService
 
 
 class WebCliTests(unittest.TestCase):
@@ -28,6 +34,49 @@ class WebCliTests(unittest.TestCase):
                 main(["--max-pages", "401"])
 
         run.assert_not_called()
+
+    def test_worker_receives_every_configured_ceiling(self) -> None:
+        config = BudgetConfig(
+            max_searches=7, max_pages=9, max_concurrent_fetches=3,
+            wall_clock_timeout_seconds=42,
+        )
+
+        class ExitedProcess:
+            stderr = io.StringIO("")
+
+            @staticmethod
+            def poll() -> int:
+                return 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), config=config, auto_start=False
+            )
+            session = service.create("Bounded worker forwarding")
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"AWS_BEARER_TOKEN_BEDROCK": "key", "TAVILY_API_KEY": "key"},
+                    clear=False,
+                ),
+                patch(
+                    "deep_research.web_sessions.subprocess.Popen",
+                    return_value=ExitedProcess(),
+                ) as popen,
+            ):
+                service._run(session)
+
+        command = popen.call_args.args[0]
+        environment = popen.call_args.kwargs["env"]
+        self.assertEqual("7", command[command.index("--max-searches") + 1])
+        self.assertEqual("9", command[command.index("--max-pages") + 1])
+        self.assertEqual(
+            "3", command[command.index("--max-concurrent-fetches") + 1]
+        )
+        self.assertEqual("42", command[command.index("--timeout") + 1])
+        self.assertEqual(
+            str(_worker_timeout(42)), environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"]
+        )
 
 
 if __name__ == "__main__":
