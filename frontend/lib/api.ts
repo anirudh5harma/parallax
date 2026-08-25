@@ -2,11 +2,15 @@ export const API_BASE =
   process.env.NEXT_PUBLIC_RESEARCH_API_URL ?? 'http://127.0.0.1:8000';
 
 export type SessionStatus =
+  | 'planning'
+  | 'ready'
   | 'queued'
   | 'running'
+  | 'synthesizing'
   | 'completed'
   | 'completed_with_errors'
-  | 'failed';
+  | 'failed'
+  | 'rejected';
 
 export type Branch = {
   parent_session_id: string;
@@ -28,6 +32,16 @@ export type SessionSummary = {
   claim_count: number;
   contested_count: number;
   error: string | null;
+  plan: ResearchPlanTask[];
+};
+
+export type ResearchPlanTask = {
+  id: string;
+  question: string;
+  rationale: string;
+  priority: 'high' | 'medium' | 'low';
+  page_budget_share: number;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 };
 
 export type Observation = {
@@ -58,13 +72,23 @@ export type SessionDetail = SessionSummary & {
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const method = init?.method ?? 'GET';
+  const url = method === 'GET'
+    ? `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_=${Date.now()}`
+    : `${API_BASE}${path}`;
+  const response = await fetch(url, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail ?? `Request failed (${response.status})`);
+    const payload: unknown = await response.json().catch(() => ({}));
+    const detail = (
+      typeof payload === 'object'
+      && payload !== null
+      && 'detail' in payload
+      && typeof payload.detail === 'string'
+    ) ? payload.detail : null;
+    throw new Error(detail ?? `Request failed (${response.status})`);
   }
   return response.json() as Promise<T>;
 }
@@ -77,6 +101,10 @@ export const api = {
     request<SessionSummary>('/api/sessions', {
       method: 'POST',
       body: JSON.stringify({ query }),
+    }),
+  start: (id: string) =>
+    request<SessionSummary>(`/api/sessions/${id}/start`, {
+      method: 'POST',
     }),
   branch: (sessionId: string, observationId: string) =>
     request<SessionSummary>(`/api/sessions/${sessionId}/branches`, {

@@ -128,6 +128,18 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertEqual("plan.rejected", events[-1]["event"])
         self.assertIn("specific", session.error)
 
+    def test_report_streaming_status_publishes_before_chunks(self) -> None:
+        session = ResearchSession(
+            id="session", query="query", title="title", created_at="now",
+            status="running",
+        )
+
+        session.begin_report()
+        status, events = session.stream_snapshot(0)
+
+        self.assertEqual("synthesizing", status)
+        self.assertEqual("report.started", events[-1]["event"])
+
     def test_concurrent_stream_never_observes_terminal_without_final_event(self) -> None:
         session = ResearchSession(
             id="session", query="query", title="title", created_at="now",

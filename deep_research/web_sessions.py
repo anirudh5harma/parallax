@@ -89,6 +89,14 @@ class ResearchSession:
             )
             self.status = "rejected"
 
+    def begin_report(self) -> None:
+        with self.lock:
+            self._publish_locked(
+                "report.started",
+                {"message": "Writing the final answer"},
+            )
+            self.status = "synthesizing"
+
     def _publish_locked(self, event: str, data: dict[str, Any]) -> None:
         event_id = self.next_event_id
         self.next_event_id += 1
@@ -280,7 +288,7 @@ class ResearchSessionService:
             active_count = sum(
                 1
                 for item in self._sessions.values()
-                if item.status in {"planning", "queued", "running"}
+                if item.status in {"planning", "queued", "running", "synthesizing"}
             )
             if active_count >= self.max_active_sessions:
                 raise SessionCapacityError("active research capacity reached")
@@ -548,24 +556,26 @@ class ResearchSessionService:
                     error=final_error,
                 )
                 return
-            terminal_events = [
-                ("report.chunk", {"text": chunk})
-                for chunk in _chunks(report, 260)
-            ]
-            terminal_events.append(
-                (
-                    "session.completed",
-                    {
-                        "message": (
-                            "Research complete with partial source failures"
-                            if final_status == "completed_with_errors"
-                            else "Research complete"
-                        ),
-                        "status": final_status,
-                    },
-                )
+            session.begin_report()
+            for chunk in _chunks(report, 260):
+                session.publish("report.chunk", text=chunk)
+                time.sleep(0.025)
+            session.finish(
+                final_status,
+                [
+                    (
+                        "session.completed",
+                        {
+                            "message": (
+                                "Research complete with partial source failures"
+                                if final_status == "completed_with_errors"
+                                else "Research complete"
+                            ),
+                            "status": final_status,
+                        },
+                    )
+                ],
             )
-            session.finish(final_status, terminal_events)
         except Exception as exc:
             if process is not None and process.poll() is None:
                 process.kill()
