@@ -14,6 +14,16 @@ python -m deep_research "What evidence supports and challenges remote work produ
 
 Optional: set `AWS_REGION` and `BEDROCK_MODEL_ID`. Defaults are `us-east-1` and `us.anthropic.claude-sonnet-4-6`.
 
+Local web workspace:
+
+```bash
+python -m pip install -e .
+deep-research-api
+cd frontend && npm install && npm run dev
+```
+
+Open `http://localhost:3000`. Web research defaults to Opus 4.6 through Bedrock; override with `BEDROCK_WEB_MODEL_ID`. Sessions stay in memory and support new research paths from contradicting citations.
+
 Default `dev` budget: 4 primary tasks, 2 follow-ups, 24 searches, 40 pages, 8 concurrent fetches, 5-minute timeout. Larger run:
 
 ```bash
@@ -60,4 +70,4 @@ Tests cover hard ceilings, depth rejection, concurrency, deduplication, literal 
 
 ## V1 boundaries
 
-No agent framework, database, embeddings, UI, multi-turn memory, deep recursion, or semantic claim merging. Similar claims stay separate unless their normalized text matches exactly.
+No agent framework, database, embeddings, auth, multi-turn memory, deep recursion, or semantic claim merging. Similar claims stay separate unless their normalized text matches exactly. Web UI is local-only in V1.
