@@ -146,3 +146,10 @@ class BudgetManager:
 
     def remaining_searches(self) -> int:
         return max(0, self.config.max_searches - self.snapshot().searches)
+
+    def remaining_seconds(self) -> float:
+        return max(
+            0.0,
+            self.config.wall_clock_timeout_seconds
+            - (time.monotonic() - self._started),
+        )

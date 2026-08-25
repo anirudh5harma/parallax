@@ -156,6 +156,14 @@ class Critique:
     followup_tasks: list[ResearchTask]
 
 
+@dataclass(frozen=True, slots=True)
+class ResearchResult:
+    task_id: str
+    observations: list[EvidenceObservation]
+    explorations: list[PageExploration]
+    errors: list[str]
+
+
 def to_primitive(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
