@@ -46,8 +46,9 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(0, status)
         command = run.call_args.args[0]
-        self.assertEqual(["-m", "deep_research"], command[1:3])
-        self.assertEqual("--_worker", command[-1])
+        self.assertEqual("-I", command[1])
+        self.assertTrue(command[2].endswith("/deep_research/_worker.py"))
+        self.assertNotIn("-m", command)
         self.assertEqual(1, run.call_args.kwargs["timeout"])
 
     def test_main_terminates_worker_at_wall_clock_ceiling(self) -> None:

@@ -35,7 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-concurrent-fetches", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=None, help="Wall-clock seconds")
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -72,28 +71,44 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigurationError(
                 "missing required environment variables: " + ", ".join(missing)
             )
+        command_args = list(argv) if argv is not None else sys.argv[1:]
+        worker_path = Path(__file__).with_name("_worker.py").resolve()
+        command = [sys.executable, "-I", str(worker_path), *command_args]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                timeout=config.wall_clock_timeout_seconds,
+            )
+            return completed.returncode
+        except subprocess.TimeoutExpired:
+            print(
+                "error: wall-clock timeout exhausted; worker terminated",
+                file=sys.stderr,
+            )
+            return 2
+    except Exception as exc:
+        if args.debug:
+            raise
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def worker_main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        config = config_from_args(args)
+        model_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+        search_key = os.environ.get("TAVILY_API_KEY")
+        if not model_key or not search_key:
+            raise ConfigurationError("worker credentials are unavailable")
         model_name = args.model or os.environ.get(
             "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6"
         )
         region = os.environ.get("AWS_REGION") or os.environ.get(
             "AWS_DEFAULT_REGION", "us-east-1"
         )
-        if not args._worker:
-            command_args = list(argv) if argv is not None else sys.argv[1:]
-            command = [sys.executable, "-m", "deep_research", *command_args, "--_worker"]
-            try:
-                completed = subprocess.run(
-                    command,
-                    check=False,
-                    timeout=config.wall_clock_timeout_seconds,
-                )
-                return completed.returncode
-            except subprocess.TimeoutExpired:
-                print(
-                    "error: wall-clock timeout exhausted; worker terminated",
-                    file=sys.stderr,
-                )
-                return 2
         artifacts = run_query(
             query=args.query,
             output_root=args.output_dir,
