@@ -418,7 +418,7 @@ class HttpPageFetcher:
 
     def fetch(self, url: str, *, timeout_seconds: float) -> FetchedPage:
         started = time.monotonic()
-        current_url = normalize_url(url)
+        current_url = self._prepare_fetch_url(url)
         for redirect_count in range(self.max_redirects + 1):
             remaining = timeout_seconds - (time.monotonic() - started)
             if remaining <= 0:
@@ -430,7 +430,7 @@ class HttpPageFetcher:
                 location = headers.get("Location")
                 if not location:
                     raise ProviderError("redirect missing location")
-                current_url = normalize_url(urljoin(current_url, location))
+                current_url = self._prepare_fetch_url(urljoin(current_url, location))
                 continue
             if not 200 <= status < 300:
                 raise ProviderError(f"page HTTP error: {status}")
@@ -465,6 +465,15 @@ class HttpPageFetcher:
             text=text,
             content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
+
+    @staticmethod
+    def _prepare_fetch_url(url: str) -> str:
+        parsed = urlsplit(url.strip())
+        if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("URL must use HTTP(S)")
+        if parsed.username or parsed.password:
+            raise ProviderError("unsafe fetch credentials")
+        return parsed._replace(scheme=parsed.scheme.casefold(), fragment="").geturl()
 
     def _fetch_once(
         self,

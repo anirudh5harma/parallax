@@ -1,6 +1,7 @@
 import json
 import socket
 import unittest
+from email.message import Message
 from unittest.mock import patch
 
 from deep_research.providers import (
@@ -132,6 +133,28 @@ class BedrockConverseModelTests(unittest.TestCase):
 
 
 class HttpPageFetcherSecurityTests(unittest.TestCase):
+    def test_redirect_preserves_server_required_trailing_slash(self) -> None:
+        headers = Message()
+        headers["Location"] = "/directory/"
+        final_headers = Message()
+        final_headers["Content-Type"] = "text/plain; charset=utf-8"
+        fetcher = HttpPageFetcher()
+        with patch.object(
+            fetcher,
+            "_fetch_once",
+            side_effect=[
+                (301, headers, b""),
+                (200, final_headers, b"Evidence text"),
+            ],
+        ) as fetch_once:
+            page = fetcher.fetch("https://example.com/directory", timeout_seconds=5)
+
+        self.assertEqual(
+            "https://example.com/directory/",
+            fetch_once.call_args_list[1].args[0],
+        )
+        self.assertEqual("Evidence text", page.text)
+
     def test_rejects_private_and_ambiguous_dns(self) -> None:
         private = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
         mixed = private + [
