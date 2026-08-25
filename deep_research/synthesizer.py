@@ -102,7 +102,10 @@ def render_report(
     *,
     remaining_gaps: list[str] | None = None,
 ) -> str:
-    serialized = json.dumps(payload, ensure_ascii=False)
+    citation_payload = {
+        key: value for key, value in payload.items() if key != "remaining_gaps"
+    }
+    serialized = json.dumps(citation_payload, ensure_ascii=False)
     cited_in_text = set(re.findall(r"\bS\d+\b", serialized))
     unknown = cited_in_text - set(context.source_urls)
     if unknown:
@@ -159,10 +162,11 @@ def render_report(
             f"source IDs are not bound to a claim finding: {sorted(unbound_citations)}"
         )
     sections.extend(["## Remaining Gaps", ""])
-    payload_gaps = payload.get("remaining_gaps", [])
-    if remaining_gaps is not None and payload_gaps != remaining_gaps:
-        raise ValueError("report gaps must match the final critic check")
-    gaps = remaining_gaps if remaining_gaps is not None else payload_gaps
+    gaps = (
+        remaining_gaps
+        if remaining_gaps is not None
+        else payload.get("remaining_gaps", [])
+    )
     if isinstance(gaps, list) and gaps:
         sections.extend(f"- {gap}" for gap in gaps)
     else:

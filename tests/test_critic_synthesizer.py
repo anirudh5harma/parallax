@@ -12,7 +12,7 @@ from deep_research.models import (
     Priority,
     ResearchTask,
 )
-from deep_research.synthesizer import CitationError
+from deep_research.synthesizer import CitationError, build_synthesis_context, render_report
 from tests.fakes import FakeModel
 
 
@@ -27,6 +27,23 @@ def task(task_id: str = "T1") -> ResearchTask:
 
 
 class CriticSynthesizerTests(unittest.TestCase):
+    def test_report_uses_canonical_final_critic_gaps(self) -> None:
+        context = build_synthesis_context([], [])
+        report = render_report(
+            {
+                "executive_summary": "No supported summary available.",
+                "main_findings": [],
+                "contested_findings": [],
+                "weak_evidence": [],
+                "remaining_gaps": ["Model paraphrase"],
+            },
+            context,
+            remaining_gaps=["Canonical critic gap"],
+        )
+
+        self.assertIn("Canonical critic gap", report)
+        self.assertNotIn("Model paraphrase", report)
+
     def test_report_schema_constrains_ledger_identifiers(self) -> None:
         schema = _report_schema(["C1", "C2"], ["S1", "S2"])
         for section in ("main_findings", "contested_findings", "weak_evidence"):
