@@ -96,7 +96,12 @@ def build_synthesis_context(
     )
 
 
-def render_report(payload: dict[str, object], context: SynthesisContext) -> str:
+def render_report(
+    payload: dict[str, object],
+    context: SynthesisContext,
+    *,
+    remaining_gaps: list[str] | None = None,
+) -> str:
     serialized = json.dumps(payload, ensure_ascii=False)
     cited_in_text = set(re.findall(r"\bS\d+\b", serialized))
     unknown = cited_in_text - set(context.source_urls)
@@ -113,7 +118,7 @@ def render_report(payload: dict[str, object], context: SynthesisContext) -> str:
         "## Main Findings",
         "",
     ]
-    cited: set[str] = set(cited_in_text)
+    cited: set[str] = set()
     _render_claim_findings(
         sections,
         payload.get("main_findings", []),
@@ -148,8 +153,16 @@ def render_report(payload: dict[str, object], context: SynthesisContext) -> str:
                     "",
                 ]
             )
+    unbound_citations = cited_in_text - cited
+    if unbound_citations:
+        raise CitationError(
+            f"source IDs are not bound to a claim finding: {sorted(unbound_citations)}"
+        )
     sections.extend(["## Remaining Gaps", ""])
-    gaps = payload.get("remaining_gaps", [])
+    payload_gaps = payload.get("remaining_gaps", [])
+    if remaining_gaps is not None and payload_gaps != remaining_gaps:
+        raise ValueError("report gaps must match the final critic check")
+    gaps = remaining_gaps if remaining_gaps is not None else payload_gaps
     if isinstance(gaps, list) and gaps:
         sections.extend(f"- {gap}" for gap in gaps)
     else:
@@ -206,6 +219,8 @@ def _validated_claim_item(
         raise CitationError("source_ids must be a string list")
     text_source_ids = set(re.findall(r"\bS\d+\b", str(item.get("synthesis", ""))))
     claim_source_ids = set(source_ids) | text_source_ids
+    if not claim_source_ids:
+        raise CitationError(f"claim finding has no citation: {claim_id}")
     invalid = claim_source_ids - context.allowed_sources_by_claim[claim_id]
     if invalid:
         raise CitationError(

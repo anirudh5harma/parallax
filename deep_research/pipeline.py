@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import threading
 
 from .audit import JsonlAuditLogger
 from .budget import BudgetManager
@@ -19,6 +20,7 @@ class PipelineResult:
     tasks: list[ResearchTask]
     initial_critique: Critique
     final_critique: Critique
+    research_results: list[ResearchResult]
 
 
 class ResearchPipeline:
@@ -43,6 +45,7 @@ class ResearchPipeline:
         tasks = self.planner.plan(query)
         primary_results = self._run_tasks(tasks)
         self._write_results(primary_results)
+        all_results = list(primary_results)
 
         can_follow_up = (
             self.budget.remaining_pages() > 0
@@ -60,6 +63,7 @@ class ResearchPipeline:
             tasks.extend(followups)
             followup_results = self._run_tasks(followups)
             self._write_results(followup_results)
+            all_results.extend(followup_results)
         self.budget.check_time()
         final = self.critic.critique(
             original_query=query,
@@ -80,14 +84,21 @@ class ResearchPipeline:
             tasks=tasks,
             initial_critique=initial,
             final_critique=final,
+            research_results=all_results,
         )
 
     def _run_tasks(self, tasks: list[ResearchTask]) -> list[ResearchResult]:
         if not tasks:
             return []
+        cancellation = threading.Event()
         executor = ThreadPoolExecutor(max_workers=min(len(tasks), 4))
         futures: dict[Future[ResearchResult], ResearchTask] = {
-            executor.submit(self.researcher.research, task): task for task in tasks
+            executor.submit(
+                self.researcher.research,
+                task,
+                cancellation=cancellation,
+            ): task
+            for task in tasks
         }
         results: list[ResearchResult] = []
         try:
@@ -110,8 +121,10 @@ class ResearchPipeline:
                         )
                     )
         except TimeoutError:
+            cancellation.set()
+            completed_task_ids = {result.task_id for result in results}
             for future, task in futures.items():
-                if not future.done():
+                if task.id not in completed_task_ids:
                     future.cancel()
                     task.status = TaskStatus.FAILED
                     results.append(
@@ -129,6 +142,8 @@ class ResearchPipeline:
 
     def _write_results(self, results: list[ResearchResult]) -> None:
         for result in results:
+            for exploration in result.explorations:
+                self.audit.log("page.explored", exploration=exploration)
             self.ledger.add_observations(result.observations)
             self.audit.log(
                 "ledger.task_result_written",

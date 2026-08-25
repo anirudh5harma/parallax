@@ -24,7 +24,11 @@ class BedrockConverseModelTests(unittest.TestCase):
         }
         response = {
             "output": {
-                "message": {"content": [{"text": '{"name":"ok","score":1,"items":[]}'}]}
+                "message": {
+                    "content": [
+                        {"text": '{"name":"okay","score":1,"items":["one"]}'}
+                    ]
+                }
             }
         }
         with patch("deep_research.providers._post_json", return_value=response) as post:
@@ -45,7 +49,7 @@ class BedrockConverseModelTests(unittest.TestCase):
         sent_schema = json.loads(
             payload["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["schema"]
         )
-        self.assertEqual({"name": "ok", "score": 1, "items": []}, result)
+        self.assertEqual({"name": "okay", "score": 1, "items": ["one"]}, result)
         self.assertEqual(
             "https://bedrock-runtime.ap-south-1.amazonaws.com/model/"
             "us.anthropic.claude-sonnet-4-6/converse",
@@ -61,6 +65,38 @@ class BedrockConverseModelTests(unittest.TestCase):
     def test_rejects_response_without_text(self) -> None:
         with self.assertRaises(ProviderError):
             BedrockConverseModel._extract_json({"output": {"message": {"content": []}}})
+
+    def test_rejects_response_violating_original_schema(self) -> None:
+        response = {
+            "output": {
+                "message": {"content": [{"text": '{"items":["one","two"]}'}]}
+            }
+        }
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "maxItems": 1,
+                    "items": {"type": "string"},
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+        with patch("deep_research.providers._post_json", return_value=response):
+            with self.assertRaisesRegex(ProviderError, "too many items"):
+                BedrockConverseModel("secret").generate_json(
+                    system_prompt="system",
+                    user_prompt="user",
+                    schema_name="result",
+                    schema=schema,
+                    timeout_seconds=10,
+                )
+
+    def test_rejects_unsafe_region(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid AWS region"):
+            BedrockConverseModel("secret", region="us-east-1@attacker.example")
 
 
 if __name__ == "__main__":

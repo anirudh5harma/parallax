@@ -46,7 +46,7 @@ class UrlRegistry:
     def __init__(self) -> None:
         self._exact_urls: set[str] = set()
         self._normalized_urls: set[str] = set()
-        self._content_hashes: set[str] = set()
+        self._content_hashes: set[tuple[str, str]] = set()
         self._domain_counts: Counter[str] = Counter()
         self._lock = threading.Lock()
 
@@ -61,11 +61,12 @@ class UrlRegistry:
             self._domain_counts[urlsplit(normalized).netloc] += 1
             return True, normalized
 
-    def claim_content(self, content_hash: str) -> bool:
+    def claim_content(self, content_hash: str, *, scope: str = "global") -> bool:
+        key = (scope, content_hash)
         with self._lock:
-            if content_hash in self._content_hashes:
+            if key in self._content_hashes:
                 return False
-            self._content_hashes.add(content_hash)
+            self._content_hashes.add(key)
             return True
 
     def domain_counts(self) -> dict[str, int]:

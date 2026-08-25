@@ -26,6 +26,7 @@ class RunArtifacts:
     events_path: Path
     run_path: Path
     report: str
+    status: str
 
 
 def run_query(
@@ -73,8 +74,23 @@ def run_query(
         result = pipeline.run(query)
         _write_json_atomic(ledger_path, ledger.dump())
         _write_text_atomic(report_path, result.report)
+        primary_ids = {task.id for task in result.tasks if task.depth == 0}
+        result_errors = {
+            item.task_id: item.errors for item in result.research_results if item.errors
+        }
+        failed_primary_ids = {
+            task.id
+            for task in result.tasks
+            if task.id in primary_ids and task.status.value == "failed"
+        }
+        if primary_ids and failed_primary_ids == primary_ids:
+            status = "failed"
+        elif result_errors:
+            status = "completed_with_errors"
+        else:
+            status = "completed"
         run_record = {
-            "status": "completed",
+            "status": status,
             "query": query,
             "budget_config": config,
             "budget_used": budget.snapshot(),
@@ -82,10 +98,12 @@ def run_query(
             "initial_critique": result.initial_critique,
             "final_critique": result.final_critique,
             "domain_counts": urls.domain_counts(),
+            "research_errors": result_errors,
         }
         _write_json_atomic(run_path, run_record)
         audit.log(
-            "run.completed",
+            "run.completed" if status != "failed" else "run.failed",
+            status=status,
             budget=budget.snapshot(),
             claim_count=len(ledger.claims()),
             observation_count=len(ledger.observations()),
@@ -97,6 +115,7 @@ def run_query(
             events_path=events_path,
             run_path=run_path,
             report=result.report,
+            status=status,
         )
     except Exception as exc:
         audit.log("run.failed", error_type=type(exc).__name__, error=str(exc))

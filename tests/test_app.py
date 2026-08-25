@@ -49,13 +49,7 @@ class AppTests(unittest.TestCase):
                     "remaining_gaps": ["Long-term outcomes"],
                     "followups": [],
                 },
-                "final_report": {
-                    "executive_summary": "One source reports an effect [S1].",
-                    "main_findings": [],
-                    "contested_findings": [],
-                    "weak_evidence": [],
-                    "remaining_gaps": ["Long-term outcomes"],
-                },
+                "final_report": lambda prompt: self._report_for_prompt(prompt),
             }
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,6 +76,26 @@ class AppTests(unittest.TestCase):
         self.assertEqual(1, len(ledger["claims"]))
         self.assertEqual("completed", run["status"])
         self.assertIn("run.completed", event_names)
+        self.assertIn("page.explored", event_names)
+
+    @staticmethod
+    def _report_for_prompt(prompt: str) -> dict[str, object]:
+        context = json.loads(prompt)
+        claim = context["structured_claims"][0]
+        source_id = claim["support"][0]["source_id"]
+        return {
+            "executive_summary": f"One source reports an effect [{source_id}].",
+            "main_findings": [
+                {
+                    "claim_id": claim["claim_id"],
+                    "synthesis": f"Evidence reports an effect [{source_id}].",
+                    "source_ids": [source_id],
+                }
+            ],
+            "contested_findings": [],
+            "weak_evidence": [],
+            "remaining_gaps": ["Long-term outcomes"],
+        }
 
 
 if __name__ == "__main__":

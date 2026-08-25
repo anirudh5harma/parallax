@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         sys.stdout.write(artifacts.report)
         print(f"Artifacts: {artifacts.run_dir}", file=sys.stderr)
-        return 0
+        return 2 if artifacts.status == "failed" else 0
     except Exception as exc:
         if args.debug:
             raise

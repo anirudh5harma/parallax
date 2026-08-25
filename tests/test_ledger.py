@@ -25,6 +25,24 @@ def observation(
 
 
 class EvidenceLedgerTests(unittest.TestCase):
+    def test_non_latin_claims_keep_distinct_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            first = observation("o1", "one.example")
+            second = EvidenceObservation(
+                observation_id="o2",
+                task_id="task-1",
+                source_url="https://two.example/article",
+                source_domain="two.example",
+                statement="यह एक अलग दावा है।",
+                polarity=Polarity.SUPPORT,
+                excerpt="यह प्रमाण का अंश है।",
+                source_type="paper",
+            )
+            ledger.add_observations([first, second])
+
+        self.assertEqual(2, len(ledger.claims()))
+
     def test_confidence_uses_distinct_domains(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))

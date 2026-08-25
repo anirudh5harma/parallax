@@ -251,7 +251,7 @@ class CriticSynthesizer:
             schema=REPORT_SCHEMA,
             timeout_seconds=self.budget.remaining_seconds(),
         )
-        report = render_report(payload, context)
+        report = render_report(payload, context, remaining_gaps=remaining_gaps)
         self.audit.log(
             "synthesis.completed",
             report_word_count=len(report.split()),

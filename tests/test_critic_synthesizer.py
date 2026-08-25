@@ -187,6 +187,83 @@ class CriticSynthesizerTests(unittest.TestCase):
                     remaining_gaps=[],
                 )
 
+    def test_synthesis_rejects_uncited_claim_finding(self) -> None:
+        model = FakeModel({})
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1",
+                        task_id="T1",
+                        source_url="https://example.com/a",
+                        source_domain="example.com",
+                        statement="X improves Y.",
+                        polarity=Polarity.SUPPORT,
+                        excerpt="Measured effect.",
+                    )
+                ]
+            )
+            claim = ledger.claims()[0]
+            model.handlers["final_report"] = {
+                "executive_summary": "Summary.",
+                "main_findings": [
+                    {
+                        "claim_id": claim.claim_id,
+                        "synthesis": "An unsupported narrative.",
+                        "source_ids": [],
+                    }
+                ],
+                "contested_findings": [],
+                "weak_evidence": [],
+                "remaining_gaps": [],
+            }
+            critic = CriticSynthesizer(model, BudgetManager(BudgetConfig()), audit)
+            with self.assertRaises(CitationError):
+                critic.synthesize(
+                    original_query="Query",
+                    tasks=[task()],
+                    claims=ledger.claims(),
+                    observations=ledger.observations(),
+                    remaining_gaps=[],
+                )
+
+    def test_synthesis_rejects_unbound_summary_citation(self) -> None:
+        model = FakeModel({})
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1",
+                        task_id="T1",
+                        source_url="https://example.com/a",
+                        source_domain="example.com",
+                        statement="X improves Y.",
+                        polarity=Polarity.SUPPORT,
+                        excerpt="Measured effect.",
+                    )
+                ]
+            )
+            model.handlers["final_report"] = {
+                "executive_summary": "Summary cites evidence without a finding [S1].",
+                "main_findings": [],
+                "contested_findings": [],
+                "weak_evidence": [],
+                "remaining_gaps": [],
+            }
+            critic = CriticSynthesizer(model, BudgetManager(BudgetConfig()), audit)
+            with self.assertRaises(CitationError):
+                critic.synthesize(
+                    original_query="Query",
+                    tasks=[task()],
+                    claims=ledger.claims(),
+                    observations=ledger.observations(),
+                    remaining_gaps=[],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

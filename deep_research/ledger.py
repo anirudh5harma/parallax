@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import re
+import unicodedata
 from typing import Iterable
 
 from .audit import JsonlAuditLogger
@@ -9,7 +9,11 @@ from .models import ConfidenceTag, EvidenceClaim, EvidenceObservation, Polarity
 
 
 def _claim_key(statement: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", statement.casefold()).strip()
+    normalized = unicodedata.normalize("NFKC", statement).casefold()
+    key = " ".join("".join(character if character.isalnum() else " " for character in normalized).split())
+    if not key:
+        raise ValueError("claim statement has no alphanumeric content")
+    return key
 
 
 class EvidenceLedger:

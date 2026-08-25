@@ -34,7 +34,10 @@ class FakeModel:
 
 
 class FakeSearch:
-    def __init__(self, results: list[SearchResult]) -> None:
+    def __init__(
+        self,
+        results: list[SearchResult] | dict[str, list[SearchResult]],
+    ) -> None:
         self.results = results
         self.calls: list[str] = []
 
@@ -43,7 +46,8 @@ class FakeSearch:
     ) -> list[SearchResult]:
         del timeout_seconds
         self.calls.append(query)
-        return self.results[:max_results]
+        results = self.results.get(query, []) if isinstance(self.results, dict) else self.results
+        return results[:max_results]
 
 
 class FakeFetcher:
