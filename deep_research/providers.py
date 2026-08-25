@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import html
+import http.client
 import ipaddress
 import json
 import math
 import re
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 from typing import Any, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from .models import FetchedPage, SearchResult
 from .urls import normalize_url
@@ -279,6 +282,9 @@ class BedrockConverseModel:
                 last_error = exc
                 if not exc.retryable or attempt + 1 >= self.max_attempts:
                     break
+                remaining = timeout_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    break
                 delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
                 time.sleep(min(delay, max(0.0, remaining)))
         raise last_error or ProviderError("model request failed")
@@ -383,34 +389,36 @@ class _TextExtractor(HTMLParser):
 
 
 class HttpPageFetcher:
-    def __init__(self, *, max_bytes: int = 2_000_000) -> None:
+    def __init__(self, *, max_bytes: int = 2_000_000, max_redirects: int = 3) -> None:
         self.max_bytes = max_bytes
+        self.max_redirects = max_redirects
 
     def fetch(self, url: str, *, timeout_seconds: float) -> FetchedPage:
-        normalized = normalize_url(url)
-        self._reject_unsafe_host(normalized)
-        request = urllib.request.Request(
-            normalized,
-            headers={
-                "User-Agent": "TransparentResearch/0.1 (+research; contact=local)",
-                "Accept": "text/html,text/plain;q=0.9",
-                "Accept-Encoding": "identity",
-            },
-        )
-        try:
-            with urllib.request.urlopen(
-                request, timeout=max(0.1, timeout_seconds)
-            ) as response:
-                content_type = response.headers.get_content_type()
-                if content_type not in {"text/html", "text/plain"}:
-                    raise ProviderError(f"unsupported content type: {content_type}")
-                raw = response.read(self.max_bytes + 1)
-                final_url = response.geturl()
-                charset = response.headers.get_content_charset() or "utf-8"
-        except ProviderError:
-            raise
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise ProviderError(f"fetch failed: {type(exc).__name__}") from exc
+        started = time.monotonic()
+        current_url = normalize_url(url)
+        for redirect_count in range(self.max_redirects + 1):
+            remaining = timeout_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                raise ProviderError("fetch timed out")
+            status, headers, raw = self._fetch_once(current_url, remaining)
+            if status in {301, 302, 303, 307, 308}:
+                if redirect_count >= self.max_redirects:
+                    raise ProviderError("too many redirects")
+                location = headers.get("Location")
+                if not location:
+                    raise ProviderError("redirect missing location")
+                current_url = normalize_url(urljoin(current_url, location))
+                continue
+            if not 200 <= status < 300:
+                raise ProviderError(f"page HTTP error: {status}")
+            content_type = headers.get_content_type()
+            if content_type not in {"text/html", "text/plain"}:
+                raise ProviderError(f"unsupported content type: {content_type}")
+            charset = headers.get_content_charset() or "utf-8"
+            final_url = current_url
+            break
+        else:  # pragma: no cover - loop always exits or raises
+            raise ProviderError("too many redirects")
         if len(raw) > self.max_bytes:
             raise ProviderError("page exceeds byte limit")
         decoded = raw.decode(charset, errors="replace")
@@ -435,14 +443,94 @@ class HttpPageFetcher:
             content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
-    @staticmethod
-    def _reject_unsafe_host(url: str) -> None:
-        host = urlsplit(url).hostname
-        if not host or host.casefold() == "localhost":
-            raise ProviderError("unsafe fetch host")
+    def _fetch_once(
+        self,
+        url: str,
+        timeout_seconds: float,
+    ) -> tuple[int, http.client.HTTPMessage, bytes]:
+        parsed = urlsplit(url)
+        host, port, address = self._resolve_safe_target(url)
+        path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        headers = {
+            "Host": host,
+            "User-Agent": "TransparentResearch/0.1 (+research; contact=local)",
+            "Accept": "text/html,text/plain;q=0.9",
+            "Accept-Encoding": "identity",
+            "Connection": "close",
+        }
+        if parsed.scheme == "https":
+            connection: http.client.HTTPConnection = _PinnedHTTPSConnection(
+                host,
+                address,
+                port,
+                timeout=max(0.1, timeout_seconds),
+            )
+        else:
+            connection = http.client.HTTPConnection(
+                address,
+                port,
+                timeout=max(0.1, timeout_seconds),
+            )
         try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            return
-        if not address.is_global:
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            raw = response.read(self.max_bytes + 1)
+            return response.status, response.headers, raw
+        except (TimeoutError, OSError, http.client.HTTPException) as exc:
+            raise ProviderError(f"fetch failed: {type(exc).__name__}") from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _resolve_safe_target(url: str) -> tuple[str, int, str]:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        if parsed.username or parsed.password:
+            raise ProviderError("unsafe fetch credentials")
+        if not host or host.rstrip(".").casefold() == "localhost":
             raise ProviderError("unsafe fetch host")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        expected_port = 443 if parsed.scheme == "https" else 80
+        if port != expected_port:
+            raise ProviderError("unsafe fetch port")
+        try:
+            targets = socket.getaddrinfo(
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
+        except socket.gaierror as exc:
+            raise ProviderError("fetch host resolution failed") from exc
+        addresses = {target[4][0] for target in targets}
+        if not addresses or any(
+            not ipaddress.ip_address(address).is_global for address in addresses
+        ):
+            raise ProviderError("unsafe fetch host")
+        return host.rstrip("."), port, sorted(addresses)[0]
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        hostname: str,
+        address: str,
+        port: int,
+        *,
+        timeout: float,
+    ) -> None:
+        super().__init__(
+            hostname,
+            port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._pinned_address = address
+
+    def connect(self) -> None:
+        sock = socket.create_connection(
+            (self._pinned_address, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)

@@ -1,8 +1,9 @@
 import json
+import socket
 import unittest
 from unittest.mock import patch
 
-from deep_research.providers import BedrockConverseModel, ProviderError
+from deep_research.providers import BedrockConverseModel, HttpPageFetcher, ProviderError
 
 
 class BedrockConverseModelTests(unittest.TestCase):
@@ -106,6 +107,39 @@ class BedrockConverseModelTests(unittest.TestCase):
     def test_rejects_unsafe_region(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid AWS region"):
             BedrockConverseModel("secret", region="us-east-1@attacker.example")
+
+
+class HttpPageFetcherSecurityTests(unittest.TestCase):
+    def test_rejects_private_and_ambiguous_dns(self) -> None:
+        private = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+        mixed = private + [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
+        ]
+        for addresses in (private, mixed):
+            with self.subTest(addresses=addresses):
+                with patch("deep_research.providers.socket.getaddrinfo", return_value=addresses):
+                    with self.assertRaisesRegex(ProviderError, "unsafe fetch host"):
+                        HttpPageFetcher._resolve_safe_target("http://example.com/")
+
+    def test_accepts_and_pins_public_dns(self) -> None:
+        public = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ]
+        with patch("deep_research.providers.socket.getaddrinfo", return_value=public):
+            target = HttpPageFetcher._resolve_safe_target("https://example.com/path")
+
+        self.assertEqual(("example.com", 443, "93.184.216.34"), target)
+
+    def test_rejects_local_alias_credentials_and_nonstandard_port(self) -> None:
+        for url in (
+            "http://localhost./",
+            "http://127.1/",
+            "http://user:pass@example.com/",
+            "https://example.com:8443/",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(ProviderError):
+                    HttpPageFetcher._resolve_safe_target(url)
 
 
 if __name__ == "__main__":
