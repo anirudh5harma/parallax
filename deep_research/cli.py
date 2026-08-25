@@ -7,7 +7,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from .app import run_query
+from .app import create_plan, load_plan, run_query
 from .budget import BudgetConfig
 from .providers import BedrockConverseModel, HttpPageFetcher, TavilySearchClient
 
@@ -35,6 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-concurrent-fetches", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=None, help="Wall-clock seconds")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--plan-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--plan-output", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--approved-plan", type=Path, default=None, help=argparse.SUPPRESS)
     return parser
 
 
@@ -64,12 +67,12 @@ def main(argv: list[str] | None = None) -> int:
         config = config_from_args(args)
         model_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
         search_key = os.environ.get("TAVILY_API_KEY")
-        if not model_key or not search_key:
+        if not model_key or (not args.plan_only and not search_key):
             missing = [
                 name
                 for name, value in (
                     ("AWS_BEARER_TOKEN_BEDROCK", model_key),
-                    ("TAVILY_API_KEY", search_key),
+                    ("TAVILY_API_KEY", search_key if not args.plan_only else "unused"),
                 )
                 if not value
             ]
@@ -117,7 +120,7 @@ def worker_main(argv: list[str] | None = None) -> int:
             )
         model_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
         search_key = os.environ.get("TAVILY_API_KEY")
-        if not model_key or not search_key:
+        if not model_key or (not args.plan_only and not search_key):
             raise ConfigurationError("worker credentials are unavailable")
         model_name = args.model or os.environ.get(
             "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6"
@@ -125,17 +128,33 @@ def worker_main(argv: list[str] | None = None) -> int:
         region = os.environ.get("AWS_REGION") or os.environ.get(
             "AWS_DEFAULT_REGION", "us-east-1"
         )
+        model = BedrockConverseModel(
+            model_key,
+            model_id=model_name,
+            region=region,
+        )
+        if args.plan_only:
+            if args.plan_output is None:
+                raise ConfigurationError("plan output path is required")
+            create_plan(
+                query=args.query,
+                output_path=args.plan_output,
+                config=config,
+                model=model,
+            )
+            return 0
         artifacts = run_query(
             query=args.query,
             output_root=args.output_dir,
             config=config,
-            model=BedrockConverseModel(
-                model_key,
-                model_id=model_name,
-                region=region,
-            ),
-            search=TavilySearchClient(search_key),
+            model=model,
+            search=TavilySearchClient(search_key or ""),
             fetcher=HttpPageFetcher(),
+            approved_tasks=(
+                load_plan(args.approved_plan, args.query)
+                if args.approved_plan is not None
+                else None
+            ),
         )
         sys.stdout.write(artifacts.report)
         print(f"Artifacts: {artifacts.run_dir}", file=sys.stderr)

@@ -11,7 +11,7 @@ from .audit import JsonlAuditLogger
 from .budget import BudgetConfig, BudgetManager
 from .critic import CriticSynthesizer
 from .ledger import EvidenceLedger
-from .models import to_primitive
+from .models import Priority, ResearchTask, TaskStatus, to_primitive
 from .pipeline import ResearchPipeline
 from .planner import Planner
 from .providers import PageFetcher, SearchClient, StructuredModel
@@ -38,6 +38,7 @@ def run_query(
     model: StructuredModel,
     search: SearchClient,
     fetcher: PageFetcher,
+    approved_tasks: list[ResearchTask] | None = None,
 ) -> RunArtifacts:
     if not query.strip():
         raise ValueError("research query must not be empty")
@@ -72,7 +73,7 @@ def run_query(
     )
     audit.log("run.started", query=query, budget_config=config)
     try:
-        result = pipeline.run(query)
+        result = pipeline.run(query, approved_tasks=approved_tasks)
         _write_json_atomic(ledger_path, ledger.dump())
         _write_text_atomic(report_path, result.report)
         primary_ids = {task.id for task in result.tasks if task.depth == 0}
@@ -136,6 +137,46 @@ def run_query(
             },
         )
         raise
+
+
+def create_plan(
+    *,
+    query: str,
+    output_path: Path,
+    config: BudgetConfig,
+    model: StructuredModel,
+) -> list[ResearchTask]:
+    output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    audit = JsonlAuditLogger(output_path.with_suffix(".events.jsonl"))
+    tasks = Planner(model, BudgetManager(config), audit).plan(query)
+    _write_json_atomic(output_path, {"query": query, "tasks": tasks})
+    return tasks
+
+
+def load_plan(path: Path, expected_query: str) -> list[ResearchTask]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("query") != expected_query:
+        raise ValueError("approved plan does not match research query")
+    raw_tasks = payload.get("tasks")
+    if not isinstance(raw_tasks, list):
+        raise ValueError("approved plan tasks are unavailable")
+    tasks = [
+        ResearchTask(
+            id=str(item["id"]),
+            question=str(item["question"]),
+            rationale=str(item["rationale"]),
+            priority=Priority(str(item["priority"])),
+            page_budget_share=float(item["page_budget_share"]),
+            parent_task_id=item.get("parent_task_id"),
+            depth=int(item.get("depth", 0)),
+            status=TaskStatus.PENDING,
+        )
+        for item in raw_tasks
+        if isinstance(item, dict)
+    ]
+    if len(tasks) != 4:
+        raise ValueError("approved plan must contain exactly four tasks")
+    return tasks
 
 
 def _write_json_atomic(path: Path, value: object) -> None:

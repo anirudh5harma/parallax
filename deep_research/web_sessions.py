@@ -18,6 +18,7 @@ from .cli import _worker_timeout
 
 
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed"}
+STREAM_END_STATUSES = TERMINAL_STATUSES | {"ready"}
 DEFAULT_OPUS_MODEL = "us.anthropic.claude-opus-4-6-v1"
 MAX_SESSION_EVENTS = 2_000
 MAX_RETAINED_SESSIONS = 50
@@ -35,13 +36,14 @@ class ResearchSession:
     query: str
     title: str
     created_at: str
-    status: str = "queued"
+    status: str = "planning"
     parent_session_id: str | None = None
     branch: dict[str, str] | None = None
     report: str | None = None
     ledger: dict[str, Any] | None = None
     run: dict[str, Any] | None = None
     error: str | None = None
+    plan: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     next_event_id: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -64,6 +66,18 @@ class ResearchSession:
             for event, data in events:
                 self._publish_locked(event, data)
             self.status = status
+
+    def mark_ready(self, tasks: list[dict[str, Any]]) -> None:
+        with self.lock:
+            self.plan = [dict(task) for task in tasks]
+            self._publish_locked(
+                "plan.ready",
+                {
+                    "message": "Research plan ready for review",
+                    "tasks": self.plan,
+                },
+            )
+            self.status = "ready"
 
     def _publish_locked(self, event: str, data: dict[str, Any]) -> None:
         event_id = self.next_event_id
@@ -110,6 +124,7 @@ class ResearchSession:
                 ),
                 "budget_used": run.get("budget_used"),
                 "error": self.error,
+                "plan": [dict(task) for task in self.plan],
             }
 
     def detail(self) -> dict[str, Any]:
@@ -250,12 +265,12 @@ class ResearchSessionService:
             parent_session_id=parent_session_id,
             branch=branch,
         )
-        session.publish("session.created", message="Research session created")
+        session.publish("session.created", message="Preparing research plan")
         with self._lock:
             active_count = sum(
                 1
                 for item in self._sessions.values()
-                if item.status not in TERMINAL_STATUSES
+                if item.status in {"planning", "queued", "running"}
             )
             if active_count >= self.max_active_sessions:
                 raise SessionCapacityError("active research capacity reached")
@@ -274,11 +289,25 @@ class ResearchSessionService:
             self._sessions[session.id] = session
         if self.auto_start:
             threading.Thread(
-                target=self._run,
+                target=self._plan,
                 args=(session,),
                 daemon=True,
-                name=f"research-session-{session.id}",
+                name=f"research-plan-{session.id}",
             ).start()
+        return session
+
+    def start(self, session_id: str) -> ResearchSession:
+        session = self.get(session_id)
+        with session.lock:
+            if session.status != "ready":
+                raise ValueError("research plan is not ready to start")
+            session.status = "queued"
+        threading.Thread(
+            target=self._run,
+            args=(session,),
+            daemon=True,
+            name=f"research-session-{session.id}",
+        ).start()
         return session
 
     def acquire_sse(self) -> bool:
@@ -335,7 +364,7 @@ class ResearchSessionService:
             branch=branch,
         )
 
-    def _run(self, session: ResearchSession) -> None:
+    def _plan(self, session: ResearchSession) -> None:
         if not self.configured():
             self._fail(session, "Bedrock and Tavily environment variables are required")
             return
@@ -343,6 +372,7 @@ class ResearchSessionService:
         try:
             session_root = self.output_root / session.id
             session_root.mkdir(parents=True, exist_ok=False, mode=0o700)
+            plan_path = session_root / "plan.json"
             worker_path = Path(__file__).with_name("_worker.py").resolve()
             command = [
                 sys.executable,
@@ -361,6 +391,80 @@ class ResearchSessionService:
                 str(self.config.max_concurrent_fetches),
                 "--timeout",
                 str(self.config.wall_clock_timeout_seconds),
+                "--plan-only",
+                "--plan-output",
+                str(plan_path),
+            ]
+            environment = os.environ.copy()
+            environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(
+                _worker_timeout(self.config.wall_clock_timeout_seconds)
+            )
+            process = subprocess.Popen(
+                command,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            with self._lock:
+                self._processes[session.id] = process
+            try:
+                process.wait(timeout=self.config.wall_clock_timeout_seconds)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                self._fail(session, "planning timeout exhausted; worker terminated")
+                return
+            payload = _read_json(plan_path)
+            tasks = payload.get("tasks")
+            if process.returncode != 0 or not isinstance(tasks, list) or len(tasks) != 4:
+                detail = "planner exited without a valid plan"
+                if process.stderr is not None:
+                    detail = process.stderr.read(500).strip() or detail
+                self._fail(session, detail)
+                return
+            session.mark_ready([dict(task) for task in tasks if isinstance(task, dict)])
+        except Exception as exc:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+            self._fail(session, f"{type(exc).__name__}: {exc}")
+        finally:
+            with self._lock:
+                self._processes.pop(session.id, None)
+
+    def _run(self, session: ResearchSession) -> None:
+        if not self.configured():
+            self._fail(session, "Bedrock and Tavily environment variables are required")
+            return
+        process: subprocess.Popen | None = None
+        try:
+            session_root = self.output_root / session.id
+            session_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            plan_path = session_root / "plan.json"
+            if not plan_path.exists():
+                self._fail(session, "approved research plan is unavailable")
+                return
+            worker_path = Path(__file__).with_name("_worker.py").resolve()
+            command = [
+                sys.executable,
+                "-I",
+                str(worker_path),
+                session.query,
+                "--output-dir",
+                str(session_root),
+                "--model",
+                self.model_id,
+                "--max-searches",
+                str(self.config.max_searches),
+                "--max-pages",
+                str(self.config.max_pages),
+                "--max-concurrent-fetches",
+                str(self.config.max_concurrent_fetches),
+                "--timeout",
+                str(self.config.wall_clock_timeout_seconds),
+                "--approved-plan",
+                str(plan_path),
             ]
             environment = os.environ.copy()
             environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(

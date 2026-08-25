@@ -1,4 +1,5 @@
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,6 +54,12 @@ class WebCliTests(unittest.TestCase):
                 output_root=Path(tmp), config=config, auto_start=False
             )
             session = service.create("Bounded worker forwarding")
+            session_root = Path(tmp) / session.id
+            session_root.mkdir()
+            (session_root / "plan.json").write_text(
+                json.dumps({"query": session.query, "tasks": [{}] * 4}),
+                encoding="utf-8",
+            )
             with (
                 patch.dict(
                     "os.environ",

@@ -10,7 +10,11 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
-from .web_sessions import ResearchSessionService, SessionCapacityError, TERMINAL_STATUSES
+from .web_sessions import (
+    ResearchSessionService,
+    SessionCapacityError,
+    STREAM_END_STATUSES,
+)
 
 
 LOCAL_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
@@ -75,6 +79,18 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return session.summary()
 
+    @app.post(
+        "/api/sessions/{session_id}/start",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_session(session_id: str) -> dict[str, object]:
+        try:
+            return sessions.start(session_id).summary()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str) -> dict[str, object]:
         try:
@@ -129,7 +145,7 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
                             f"event: {event['event']}\n"
                             f"data: {payload}\n\n"
                         )
-                    if session_status in TERMINAL_STATUSES:
+                    if session_status in STREAM_END_STATUSES:
                         break
                     yield ": keepalive\n\n"
                     await asyncio.sleep(0.35)

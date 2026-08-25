@@ -92,3 +92,21 @@ class Planner:
             budget=self.budget.snapshot(),
         )
         return tasks
+
+    def accept(self, query: str, tasks: list[ResearchTask]) -> list[ResearchTask]:
+        if len(tasks) != 4:
+            raise ValueError("approved plan must contain exactly four tasks")
+        if any(task.depth != 0 or task.parent_task_id is not None for task in tasks):
+            raise ValueError("approved plan may only contain primary tasks")
+        if len({task.id for task in tasks}) != len(tasks):
+            raise ValueError("approved plan task IDs must be unique")
+        for task in tasks:
+            self.budget.reserve_primary_task()
+        self.audit.log(
+            "planner.plan_created",
+            original_query=query,
+            tasks=tasks,
+            approved_preview=True,
+            budget=self.budget.snapshot(),
+        )
+        return tasks

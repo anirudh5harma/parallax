@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+import json
 from unittest.mock import patch
 from pathlib import Path
 
@@ -103,6 +104,18 @@ class ResearchSessionServiceTests(unittest.TestCase):
             [event["event"] for event in session.event_slice(0)],
         )
 
+    def test_ready_status_and_plan_event_publish_together(self) -> None:
+        session = ResearchSession(
+            id="session", query="query", title="title", created_at="now"
+        )
+        session.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+
+        status, events = session.stream_snapshot(0)
+
+        self.assertEqual("ready", status)
+        self.assertEqual("plan.ready", events[-1]["event"])
+        self.assertEqual(4, len(session.summary()["plan"]))
+
     def test_concurrent_stream_never_observes_terminal_without_final_event(self) -> None:
         session = ResearchSession(
             id="session", query="query", title="title", created_at="now",
@@ -149,6 +162,12 @@ class ResearchSessionServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
             session = service.create("A bounded query")
+            session_root = Path(tmp) / session.id
+            session_root.mkdir()
+            (session_root / "plan.json").write_text(
+                json.dumps({"query": session.query, "tasks": [{}] * 4}),
+                encoding="utf-8",
+            )
             with (
                 patch.dict(
                     "os.environ",

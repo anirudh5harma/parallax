@@ -41,8 +41,16 @@ class ResearchPipeline:
         self.budget = budget
         self.audit = audit
 
-    def run(self, query: str) -> PipelineResult:
-        tasks = self.planner.plan(query)
+    def run(
+        self,
+        query: str,
+        approved_tasks: list[ResearchTask] | None = None,
+    ) -> PipelineResult:
+        tasks = (
+            self.planner.accept(query, approved_tasks)
+            if approved_tasks is not None
+            else self.planner.plan(query)
+        )
         primary_results = self._run_tasks(tasks)
         self._write_results(primary_results)
         all_results = list(primary_results)
