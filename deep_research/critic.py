@@ -265,33 +265,57 @@ class CriticSynthesizer:
                 budget=self.budget.snapshot(),
             )
             return report
+        system_prompt = (
+            "You are Critic/Synthesizer, one of exactly three roles. Produce a concise "
+            "800-1800 word report. Preserve confidence tiers and disagreement. Use only "
+            "provided claim IDs and source IDs. Each finding may cite only source IDs listed "
+            "inside that claim's allowed_source_ids. Put source IDs only in finding source_ids "
+            "or finding synthesis, never in the executive summary. Never create numeric "
+            "confidence scores."
+        )
+        report_input = {
+            "original_query": original_query,
+            "planner_tasks": [
+                {"id": task.id, "question": task.question} for task in tasks
+            ],
+            "structured_claims": context.packet,
+            "remaining_gaps": remaining_gaps,
+        }
+        schema = _report_schema(
+            sorted(context.claims_by_id),
+            sorted(context.source_urls, key=lambda item: int(item[1:])),
+        )
         payload = self.model.generate_json(
-            system_prompt=(
-                "You are Critic/Synthesizer, one of exactly three roles. Produce a concise "
-                "800-1800 word report. Preserve confidence tiers and disagreement. Use only "
-                "provided claim IDs and source IDs. Put source IDs only in finding source_ids or "
-                "finding synthesis, never in the executive summary. Never create numeric "
-                "confidence scores."
-            ),
-            user_prompt=json.dumps(
-                {
-                    "original_query": original_query,
-                    "planner_tasks": [
-                        {"id": task.id, "question": task.question} for task in tasks
-                    ],
-                    "structured_claims": context.packet,
-                    "remaining_gaps": remaining_gaps,
-                },
-                ensure_ascii=False,
-            ),
+            system_prompt=system_prompt,
+            user_prompt=json.dumps(report_input, ensure_ascii=False),
             schema_name="final_report",
-            schema=_report_schema(
-                sorted(context.claims_by_id),
-                sorted(context.source_urls, key=lambda item: int(item[1:])),
-            ),
+            schema=schema,
             timeout_seconds=self.budget.remaining_seconds(),
         )
-        report = render_report(payload, context, remaining_gaps=remaining_gaps)
+        try:
+            report = render_report(payload, context, remaining_gaps=remaining_gaps)
+        except ValueError as exc:
+            self.audit.log(
+                "synthesis.validation_retry",
+                reason=" ".join(str(exc).split())[:300],
+            )
+            repair_input = {
+                **report_input,
+                "invalid_report": payload,
+                "validation_error": " ".join(str(exc).split())[:300],
+                "repair_instruction": (
+                    "Regenerate the complete report once. Correct the validation error. "
+                    "Do not add claims or sources."
+                ),
+            }
+            payload = self.model.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=json.dumps(repair_input, ensure_ascii=False),
+                schema_name="final_report",
+                schema=schema,
+                timeout_seconds=self.budget.remaining_seconds(),
+            )
+            report = render_report(payload, context, remaining_gaps=remaining_gaps)
         self.audit.log(
             "synthesis.completed",
             report_word_count=len(report.split()),
