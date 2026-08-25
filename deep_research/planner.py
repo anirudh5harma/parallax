@@ -80,8 +80,8 @@ class Planner:
             schema=PLAN_SCHEMA,
             timeout_seconds=self.budget.remaining_seconds(),
         )
-        disposition = str(payload.get("disposition", "researchable"))
-        reason = str(payload.get("reason", "Ready for research"))
+        disposition = str(payload["disposition"])
+        reason = str(payload["reason"])
         raw_tasks = payload.get("tasks")
         if disposition == "reject":
             if raw_tasks not in ([], None):

@@ -316,9 +316,16 @@ class ResearchSessionService:
 
     def start(self, session_id: str) -> ResearchSession:
         session = self.get(session_id)
-        with session.lock:
+        with self._lock, session.lock:
             if session.status != "ready":
                 raise ValueError("research plan is not ready to start")
+            active_count = sum(
+                1
+                for item in self._sessions.values()
+                if item.status in {"planning", "queued", "running", "synthesizing"}
+            )
+            if active_count >= self.max_active_sessions:
+                raise SessionCapacityError("active research capacity reached")
             session.status = "queued"
         threading.Thread(
             target=self._run,

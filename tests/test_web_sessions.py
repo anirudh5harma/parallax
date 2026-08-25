@@ -73,6 +73,25 @@ class ResearchSessionServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(SessionCapacityError, "capacity"):
                 service.create("Second bounded query")
 
+    def test_start_rechecks_active_capacity_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), auto_start=False, max_active_sessions=1
+            )
+            first = service.create("First bounded query")
+            first.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+            second = service.create("Second bounded query")
+            second.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+
+            with patch("deep_research.web_sessions.threading.Thread") as worker:
+                service.start(first.id)
+                with self.assertRaisesRegex(SessionCapacityError, "capacity"):
+                    service.start(second.id)
+
+            worker.assert_called_once()
+            self.assertEqual("queued", first.status)
+            self.assertEqual("ready", second.status)
+
     def test_event_retention_is_bounded_with_monotonic_ids(self) -> None:
         session = ResearchSession(
             id="session", query="query", title="title", created_at="now"

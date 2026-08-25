@@ -66,6 +66,7 @@ export default function Home() {
   const refreshSessions = useCallback(async () => { const items = await api.sessions(); setSessions(items); return items; }, []);
   const loadDetail = useCallback(async (id: string) => { const value = await api.session(id); if (activeIdRef.current === id) { setDetail(value); if (value.report) setStreamedReport(value.report); } return value; }, []);
   const updateSession = useCallback((id: string, patch: Partial<SessionSummary>) => setSessions((items) => items.map((item) => item.id === id ? { ...item, ...patch } : item)), []);
+  const renderedReport = useMemo(() => cleanReport(streamedReport), [streamedReport]);
 
   const connect = useCallback((session: SessionSummary) => {
     streamRef.current?.close();
@@ -83,7 +84,7 @@ export default function Home() {
     };
     stream.addEventListener('session.created', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (data) push(data, event); });
     stream.addEventListener('plan.ready', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; push(data, event, 'done'); if (!replayingTerminal) { updateSession(session.id, { status: 'ready', plan: data.tasks ?? [] }); stream.close(); await loadDetail(session.id); } });
-    stream.addEventListener('plan.rejected', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; push(data, event, 'warning'); if (!replayingTerminal) { updateSession(session.id, { status: 'rejected', error: data.message ?? 'Please rewrite the question.' }); stream.close(); await loadDetail(session.id); } });
+    stream.addEventListener('plan.rejected', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; push(data, event, 'warning'); if (!replayingTerminal) { updateSession(session.id, { status: 'rejected', error: data.message ?? 'Please rewrite the question.' }); await loadDetail(session.id); } stream.close(); });
     stream.addEventListener('session.started', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; if (!replayingTerminal) updateSession(session.id, { status: 'running' }); push(data, event); });
     stream.addEventListener('research.progress', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (data) push(data, event); });
     stream.addEventListener('report.started', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; if (!replayingTerminal) { updateSession(session.id, { status: 'synthesizing' }); if (activeIdRef.current === session.id) setStreamedReport(''); } push(data, event); });
@@ -99,7 +100,7 @@ export default function Home() {
   }, [connect]);
 
   function selectSession(session: SessionSummary) {
-    streamRef.current?.close(); activeIdRef.current = session.id; setActiveId(session.id); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); connect(session);
+    streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = session.id; setActiveId(session.id); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); connect(session);
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!query.trim() || busy) return; setBusy(true); setError(null);
@@ -119,13 +120,13 @@ export default function Home() {
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Evidence path could not start'); }
     finally { setBranching(null); }
   }
-  function newResearch() { streamRef.current?.close(); activeIdRef.current = null; setActiveId(null); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); }
+  function newResearch() { streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = null; setActiveId(null); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); }
   const openCitation = useCallback((sourceId: string) => { const selection = findCitation(detail?.evidence ?? [], sourceId); if (selection) setDrawer(selection); }, [detail]);
 
   return <main className="shell">
     <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}><div className="brand"><span className="brand-orbit" aria-hidden="true" /><strong>Parallax</strong></div><button className="new-thread" onClick={newResearch} type="button"><span>＋</span> New research</button><p className="sidebar-label">Your research</p><nav className="history" aria-label="Research history">{roots.length === 0 && <p className="history-empty">Research sessions will appear here.</p>}{roots.map((session) => <div key={session.id}><SessionItem active={activeId === session.id} onClick={() => selectSession(session)} session={session} />{children(session.id).map((child) => <SessionItem active={activeId === child.id} child key={child.id} onClick={() => selectSession(child)} session={child} />)}</div>)}</nav><div className="local-status"><span className={configured === false ? 'offline' : ''} />{configured === false ? 'API keys required' : 'Local workspace'}</div></aside>
     <button className="mobile-menu" onClick={() => setSidebarOpen((value) => !value)} type="button" aria-label="Toggle research history">☰</button>
-    <section className="main-column">{error && <div className="error-banner" role="alert">{error}<button onClick={() => setError(null)} type="button">Dismiss</button></div>}{!active ? <Welcome query={query} setQuery={setQuery} submit={submit} busy={busy} configured={configured} /> : <ResearchConversation active={active} activity={activity} busy={busy} detail={detail} newResearch={newResearch} openCitation={openCitation} report={cleanReport(streamedReport)} setView={setView} startResearch={startResearch} view={view} />}</section>
+    <section className="main-column">{error && <div className="error-banner" role="alert">{error}<button onClick={() => setError(null)} type="button">Dismiss</button></div>}{!active ? <Welcome query={query} setQuery={setQuery} submit={submit} busy={busy} configured={configured} /> : <ResearchConversation active={active} activity={activity} busy={busy} detail={detail} newResearch={newResearch} openCitation={openCitation} report={renderedReport} setView={setView} startResearch={startResearch} view={view} />}</section>
     {drawer && <EvidenceDrawer branching={branching} close={() => setDrawer(null)} selection={drawer} startBranch={startBranch} />}
   </main>;
 }
@@ -146,7 +147,7 @@ function PlanReview({ plan, busy, start }: { plan: SessionSummary['plan']; busy:
 
 function ResearchingState({ activity, plan }: { activity: Activity[]; plan: SessionSummary['plan'] }) {
   const activeTasks = new Set(activity.map((item) => item.taskId).filter(Boolean));
-  return <div className="assistant-message"><span className="assistant-mark thinking">P</span><div className="research-live"><h2>Researching across sources</h2><p className="live-message"><span />{activity.at(-1)?.message ?? 'Starting parallel evidence paths…'}</p><div className="live-plan">{plan.map((task, index) => <div className={activeTasks.has(task.id) ? 'active' : ''} key={task.id}><span>{activeTasks.has(task.id) ? <i /> : index + 1}</span><p>{task.question}</p></div>)}</div><p className="leave-note">You can leave this session. Research continues locally.</p></div></div>;
+  return <div className="assistant-message"><span className="assistant-mark thinking">P</span><div className="research-live"><h2>Researching across sources</h2><p className="live-message"><span />{activity.at(-1)?.message ?? 'Starting parallel evidence paths…'}</p><div className="live-plan">{plan.map((task, index) => <div className={activeTasks.has(task.id) ? 'visited' : ''} key={task.id}><span>{activeTasks.has(task.id) ? '✓' : index + 1}</span><p>{task.question}</p></div>)}</div><p className="leave-note">You can leave this session. Research continues locally.</p></div></div>;
 }
 
 function Report({ report, evidence, openCitation, streaming }: { report: string; evidence: EvidenceClaim[]; openCitation: (id: string) => void; streaming: boolean }) {
@@ -168,7 +169,7 @@ function ProcessView({ activity, detail, plan }: { activity: Activity[]; detail:
 function EvidenceDrawer({ branching, close, selection, startBranch }: { branching: string | null; close: () => void; selection: DrawerSelection; startBranch: (observation: Observation) => void }) {
   const { claim, observation } = selection;
   const support = claim.observations.filter((item) => item.polarity === 'support'); const contradictions = claim.observations.filter((item) => item.polarity === 'contradict');
-  return <><button className="drawer-backdrop" onClick={close} type="button" aria-label="Close evidence" /><aside className="evidence-drawer" aria-label={`Evidence for ${observation.source_id}`}><header><div><span>{observation.source_id}</span><p>Evidence details</p></div><button onClick={close} type="button" aria-label="Close">×</button></header><div className="drawer-scroll"><a className="selected-source" href={observation.source_url} rel="noreferrer" target="_blank"><span>{observation.source_domain}</span><strong>{observation.statement}</strong><p>“{observation.excerpt}”</p><small>Open original source ↗</small></a><section className="confidence-panel"><div><span>Confidence</span><strong className={`confidence-${claim.confidence.toLowerCase()}`}>{claim.confidence}</strong></div><p>Rule-based tier · {claim.supporting_domain_count} supporting {claim.supporting_domain_count === 1 ? 'domain' : 'domains'}{claim.disagreement ? ` · ${claim.contradicting_domain_count} contradicting` : ''}</p></section><section className="drawer-claim"><span>Claim</span><h2>{claim.text}</h2></section><SourceGroup label="Supporting sources" observations={support} /><SourceGroup branching={branching} label="Contradicting sources" observations={contradictions} startBranch={startBranch} />{contradictions.length === 0 && <p className="no-contradiction">No contradicting evidence attached to this claim.</p>}</div></aside></>;
+  return <><div className="drawer-backdrop" aria-hidden="true" /><aside className="evidence-drawer" aria-label={`Evidence for ${observation.source_id}`}><header><div><span>{observation.source_id}</span><p>Evidence details</p></div><button onClick={close} type="button" aria-label="Close">×</button></header><div className="drawer-scroll"><a className="selected-source" href={observation.source_url} rel="noreferrer" target="_blank"><span>{observation.source_domain}</span><strong>{observation.statement}</strong><p>“{observation.excerpt}”</p><small>Open original source ↗</small></a><section className="confidence-panel"><div><span>Confidence</span><strong className={`confidence-${claim.confidence.toLowerCase()}`}>{claim.confidence}</strong></div><p>Rule-based tier · {claim.supporting_domain_count} supporting {claim.supporting_domain_count === 1 ? 'domain' : 'domains'}{claim.disagreement ? ` · ${claim.contradicting_domain_count} contradicting` : ''}</p></section><section className="drawer-claim"><span>Claim</span><h2>{claim.text}</h2></section><SourceGroup label="Supporting sources" observations={support} /><SourceGroup branching={branching} label="Contradicting sources" observations={contradictions} startBranch={startBranch} />{contradictions.length === 0 && <p className="no-contradiction">No contradicting evidence attached to this claim.</p>}</div></aside></>;
 }
 
 function SourceGroup({ branching, label, observations, startBranch }: { branching?: string | null; label: string; observations: Observation[]; startBranch?: (observation: Observation) => void }) {

@@ -16,6 +16,8 @@ class PlannerTests(unittest.TestCase):
         model = FakeModel(
             {
                 "research_plan": {
+                    "disposition": "researchable",
+                    "reason": "Ready for research.",
                     "tasks": [
                         {
                             "question": f"Question {index}?",
@@ -39,7 +41,15 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(4, budget.snapshot().primary_tasks)
 
     def test_planner_rejects_wrong_task_count(self) -> None:
-        model = FakeModel({"research_plan": {"tasks": []}})
+        model = FakeModel(
+            {
+                "research_plan": {
+                    "disposition": "researchable",
+                    "reason": "Ready for research.",
+                    "tasks": [],
+                }
+            }
+        )
         with tempfile.TemporaryDirectory() as tmp:
             planner = Planner(
                 model,

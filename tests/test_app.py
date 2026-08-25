@@ -56,6 +56,8 @@ class AppTests(unittest.TestCase):
         model = FakeModel(
             {
                 "research_plan": {
+                    "disposition": "researchable",
+                    "reason": "Ready for research.",
                     "tasks": [
                         {
                             "question": f"Question {index}?",
