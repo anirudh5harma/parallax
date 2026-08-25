@@ -4,6 +4,7 @@ import unittest
 from email.message import Message
 from unittest.mock import patch
 
+from deep_research.pdf_extraction import PdfExtraction
 from deep_research.providers import (
     BedrockConverseModel,
     HttpPageFetcher,
@@ -193,6 +194,76 @@ class BedrockConverseModelTests(unittest.TestCase):
 
 
 class HttpPageFetcherSecurityTests(unittest.TestCase):
+    def test_extracts_valid_pdf_without_relaxing_url_safety(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/pdf"
+        fetcher = HttpPageFetcher()
+        extraction = PdfExtraction(
+            text="A literal finding from the paper.",
+            title="Paper title",
+            page_count=12,
+        )
+        with (
+            patch.object(fetcher, "_fetch_once", return_value=(200, headers, b"%PDF-1.7")),
+            patch("deep_research.providers.extract_pdf", return_value=extraction) as extract,
+        ):
+            page = fetcher.fetch("https://example.com/paper.pdf", timeout_seconds=5)
+
+        self.assertEqual("Paper title", page.title)
+        self.assertEqual(extraction.text, page.text)
+        extract.assert_called_once()
+
+    def test_accepts_signature_sniffed_pdf_from_generic_content_type(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/octet-stream"
+        fetcher = HttpPageFetcher()
+        extraction = PdfExtraction("Useful evidence text.", "", 1)
+        with (
+            patch.object(fetcher, "_fetch_once", return_value=(200, headers, b"%PDF-1.7")),
+            patch("deep_research.providers.extract_pdf", return_value=extraction),
+        ):
+            page = fetcher.fetch("https://example.com/download", timeout_seconds=5)
+
+        self.assertEqual(extraction.text, page.text)
+
+    def test_rejects_pdf_content_type_without_pdf_signature(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/pdf"
+        fetcher = HttpPageFetcher()
+        with patch.object(fetcher, "_fetch_once", return_value=(200, headers, b"not a pdf")):
+            with self.assertRaisesRegex(ProviderError, "invalid PDF signature"):
+                fetcher.fetch("https://example.com/paper.pdf", timeout_seconds=5)
+
+    def test_applies_separate_html_and_pdf_byte_limits(self) -> None:
+        fetcher = HttpPageFetcher(max_bytes=10, max_pdf_bytes=20)
+        html_headers = Message()
+        html_headers["Content-Type"] = "text/html"
+        pdf_headers = Message()
+        pdf_headers["Content-Type"] = "application/pdf"
+
+        self.assertEqual(10, fetcher._response_byte_limit("https://example.com", html_headers))
+        self.assertEqual(
+            20,
+            fetcher._response_byte_limit("https://example.com/download", pdf_headers),
+        )
+        self.assertEqual(
+            20,
+            fetcher._response_byte_limit(
+                "https://example.com/download",
+                html_headers,
+                b"%PDF-1.7",
+            ),
+        )
+
+    def test_rejects_pdf_over_its_separate_byte_limit(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/pdf"
+        fetcher = HttpPageFetcher(max_bytes=10, max_pdf_bytes=20)
+        raw = b"%PDF-" + (b"x" * 16)
+        with patch.object(fetcher, "_fetch_once", return_value=(200, headers, raw)):
+            with self.assertRaisesRegex(ProviderError, "PDF exceeds byte limit"):
+                fetcher.fetch("https://example.com/paper.pdf", timeout_seconds=5)
+
     def test_redirect_preserves_server_required_trailing_slash(self) -> None:
         headers = Message()
         headers["Location"] = "/directory/"

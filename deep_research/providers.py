@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from .models import FetchedPage, SearchResult
+from .pdf_extraction import PdfExtractionError, extract_pdf
 from .urls import normalize_url
 
 
@@ -412,8 +413,31 @@ class _TextExtractor(HTMLParser):
 
 
 class HttpPageFetcher:
-    def __init__(self, *, max_bytes: int = 2_000_000, max_redirects: int = 3) -> None:
+    PDF_CONTENT_TYPES = frozenset({"application/pdf", "application/x-pdf"})
+
+    def __init__(
+        self,
+        *,
+        max_bytes: int = 2_000_000,
+        max_pdf_bytes: int = 20_000_000,
+        max_pdf_pages: int = 150,
+        max_pdf_chars: int = 120_000,
+        max_pdf_parse_seconds: float = 15,
+        max_redirects: int = 3,
+    ) -> None:
+        if min(
+            max_bytes,
+            max_pdf_bytes,
+            max_pdf_pages,
+            max_pdf_chars,
+            max_pdf_parse_seconds,
+        ) <= 0:
+            raise ValueError("fetch limits must be positive")
         self.max_bytes = max_bytes
+        self.max_pdf_bytes = max_pdf_bytes
+        self.max_pdf_pages = max_pdf_pages
+        self.max_pdf_chars = max_pdf_chars
+        self.max_pdf_parse_seconds = max_pdf_parse_seconds
         self.max_redirects = max_redirects
 
     def fetch(self, url: str, *, timeout_seconds: float) -> FetchedPage:
@@ -434,26 +458,46 @@ class HttpPageFetcher:
                 continue
             if not 200 <= status < 300:
                 raise ProviderError(f"page HTTP error: {status}")
-            content_type = headers.get_content_type()
-            if content_type not in {"text/html", "text/plain"}:
+            content_type = headers.get_content_type().casefold()
+            pdf_hint = self._is_pdf_hint(current_url, headers)
+            is_pdf = pdf_hint or self._looks_like_pdf(raw)
+            if pdf_hint and not self._looks_like_pdf(raw):
+                raise ProviderError("invalid PDF signature")
+            if not is_pdf and content_type not in {"text/html", "text/plain"}:
                 raise ProviderError(f"unsupported content type: {content_type}")
             charset = headers.get_content_charset() or "utf-8"
             final_url = current_url
             break
         else:  # pragma: no cover - loop always exits or raises
             raise ProviderError("too many redirects")
-        if len(raw) > self.max_bytes:
-            raise ProviderError("page exceeds byte limit")
-        decoded = raw.decode(charset, errors="replace")
-        if content_type == "text/html":
-            parser = _TextExtractor()
-            parser.feed(decoded)
-            text = " ".join(parser.parts)
-            title = " ".join(parser.title_parts)
+        byte_limit = self.max_pdf_bytes if is_pdf else self.max_bytes
+        if len(raw) > byte_limit:
+            kind = "PDF" if is_pdf else "page"
+            raise ProviderError(f"{kind} exceeds byte limit")
+        if is_pdf:
+            remaining = timeout_seconds - (time.monotonic() - started)
+            try:
+                extraction = extract_pdf(
+                    raw,
+                    timeout_seconds=min(self.max_pdf_parse_seconds, remaining),
+                    max_pages=self.max_pdf_pages,
+                    max_chars=self.max_pdf_chars,
+                )
+            except PdfExtractionError as exc:
+                raise ProviderError(str(exc)) from exc
+            text = extraction.text
+            title = extraction.title
         else:
-            text = decoded
-            title = ""
-        text = " ".join(html.unescape(text).split())
+            decoded = raw.decode(charset, errors="replace")
+            if content_type == "text/html":
+                parser = _TextExtractor()
+                parser.feed(decoded)
+                text = " ".join(parser.parts)
+                title = " ".join(parser.title_parts)
+            else:
+                text = decoded
+                title = ""
+            text = " ".join(html.unescape(text).split())
         if not text:
             raise ProviderError("page contained no extractable text")
         final_normalized = normalize_url(final_url)
@@ -465,6 +509,27 @@ class HttpPageFetcher:
             text=text,
             content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
+
+    @classmethod
+    def _is_pdf_hint(cls, url: str, headers: http.client.HTTPMessage) -> bool:
+        if headers.get_content_type().casefold() in cls.PDF_CONTENT_TYPES:
+            return True
+        path = urlsplit(url).path.casefold()
+        disposition = headers.get("Content-Disposition", "").casefold()
+        return path.endswith(".pdf") or bool(re.search(r"filename\*?=.*\.pdf", disposition))
+
+    @staticmethod
+    def _looks_like_pdf(raw: bytes) -> bool:
+        return b"%PDF-" in raw[:1024]
+
+    def _response_byte_limit(
+        self,
+        url: str,
+        headers: http.client.HTTPMessage,
+        prefix: bytes = b"",
+    ) -> int:
+        is_pdf = self._is_pdf_hint(url, headers) or self._looks_like_pdf(prefix)
+        return self.max_pdf_bytes if is_pdf else self.max_bytes
 
     @staticmethod
     def _prepare_fetch_url(url: str) -> str:
@@ -512,7 +577,9 @@ class HttpPageFetcher:
             try:
                 connection.request("GET", path, headers=headers)
                 response = connection.getresponse()
-                raw = response.read(self.max_bytes + 1)
+                prefix = response.read(1024)
+                byte_limit = self._response_byte_limit(url, response.headers, prefix)
+                raw = prefix + response.read(max(0, byte_limit + 1 - len(prefix)))
                 return response.status, response.headers, raw
             except (TimeoutError, OSError, http.client.HTTPException) as exc:
                 last_error = exc

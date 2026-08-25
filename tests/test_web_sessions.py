@@ -373,6 +373,16 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertEqual("Evidence observation added to the ledger", event["message"])
         self.assertNotIn("Sensitive", str(event))
 
+    def test_fetch_failures_remain_in_audit_log_not_activity_stream(self) -> None:
+        event = _public_audit_event(
+            {
+                "event": "page.fetch_failed",
+                "data": {"error": "unsupported content type: application/pdf"},
+            }
+        )
+
+        self.assertIsNone(event)
+
 
 if __name__ == "__main__":
     unittest.main()
