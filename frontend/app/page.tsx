@@ -48,40 +48,40 @@ export default function Home() {
   const [detail, setDetail] = useState<SessionDetail | null>(null); const [streamedReport, setStreamedReport] = useState(''); const [activity, setActivity] = useState<Activity[]>([]);
   const [tab, setTab] = useState<Tab>('report'); const [error, setError] = useState<string | null>(null); const [configured, setConfigured] = useState<boolean | null>(null);
   const [model, setModel] = useState('Bedrock · Opus'); const [submitting, setSubmitting] = useState(false); const [branching, setBranching] = useState<string | null>(null); const streamRef = useRef<EventSource | null>(null);
+  const seenEventsRef = useRef(new Set<string>());
   const active = sessions.find((session) => session.id === activeId) ?? null;
   const roots = useMemo(() => sessions.filter((item) => !item.parent_session_id), [sessions]);
   const children = useCallback((id: string) => sessions.filter((item) => item.parent_session_id === id), [sessions]);
   const refreshSessions = useCallback(async () => { const items = await api.sessions(); setSessions(items); return items; }, []);
   const loadDetail = useCallback(async (id: string) => { const value = await api.session(id); setDetail(value); if (value.report) setStreamedReport(value.report); return value; }, []);
+  const updateStatus = useCallback((id: string, status: SessionStatus) => setSessions((items) => items.map((item) => item.id === id ? { ...item, status } : item)), []);
 
   const connect = useCallback((session: SessionSummary) => {
     streamRef.current?.close();
     if (terminal.has(session.status)) { void loadDetail(session.id); return; }
     const stream = new EventSource(`${API_BASE}/api/sessions/${session.id}/events`); streamRef.current = stream;
-    const push = (event: MessageEvent, tone?: Activity['tone']) => { const data = JSON.parse(event.data) as { message?: string; stage?: string }; if (data.message) setActivity((items) => [...items, { id: `${event.lastEventId}-${items.length}`, message: data.message!, stage: data.stage, tone }]); };
-    stream.addEventListener('session.started', (event) => push(event as MessageEvent)); stream.addEventListener('research.progress', (event) => push(event as MessageEvent));
-    stream.addEventListener('report.chunk', (event) => { const data = JSON.parse((event as MessageEvent).data) as { text: string }; setStreamedReport((value) => value + data.text); });
-    stream.addEventListener('session.completed', async (event) => { push(event as MessageEvent, 'done'); stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
-    stream.addEventListener('session.failed', async (event) => { push(event as MessageEvent, 'warning'); stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
+    const consume = (event: MessageEvent) => { const key = `${session.id}:${event.lastEventId}`; if (seenEventsRef.current.has(key)) return null; seenEventsRef.current.add(key); return JSON.parse(event.data) as { message?: string; stage?: string; text?: string; status?: SessionStatus }; };
+    const push = (data: { message?: string; stage?: string }, event: MessageEvent, tone?: Activity['tone']) => { if (data.message) setActivity((items) => [...items, { id: `${session.id}-${event.lastEventId}`, message: data.message!, stage: data.stage, tone }]); };
+    stream.addEventListener('session.started', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateStatus(session.id, 'running'); push(data, event); }); stream.addEventListener('research.progress', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (data) push(data, event); });
+    stream.addEventListener('report.chunk', (raw) => { const data = consume(raw as MessageEvent); if (data?.text) setStreamedReport((value) => value + data.text); });
+    stream.addEventListener('session.completed', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateStatus(session.id, data.status ?? 'completed'); push(data, event, 'done'); stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
+    stream.addEventListener('session.failed', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateStatus(session.id, 'failed'); push(data, event, 'warning'); stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
     stream.onerror = () => { if (stream.readyState !== EventSource.CLOSED) setError('Live connection interrupted. Reconnecting…'); };
-  }, [loadDetail, refreshSessions]);
+  }, [loadDetail, refreshSessions, updateStatus]);
 
-  useEffect(() => { Promise.all([api.health(), api.sessions()]).then(([health, items]) => { setConfigured(health.configured); setModel(health.model.replace('us.anthropic.claude-', 'Opus ').replace('-v1', '').replaceAll('-', '.')); setSessions(items); if (items[0]) setActiveId(items[0].id); }).catch((cause: Error) => setError(`Research service unavailable: ${cause.message}`)); return () => streamRef.current?.close(); }, []);
-  // Session selection synchronizes one external SSE connection with UI state.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { if (!activeId) return; const session = sessions.find((item) => item.id === activeId); if (!session) return; connect(session); return () => streamRef.current?.close(); }, [activeId, connect, sessions]);
+  useEffect(() => { Promise.all([api.health(), api.sessions()]).then(([health, items]) => { setConfigured(health.configured); setModel(health.model.replace('us.anthropic.claude-', 'Opus ').replace('-v1', '').replaceAll('-', '.')); setSessions(items); if (items[0]) { setActiveId(items[0].id); connect(items[0]); } }).catch((cause: Error) => setError(`Research service unavailable: ${cause.message}`)); return () => streamRef.current?.close(); }, [connect]);
 
-  function selectSession(id: string) { if (id === activeId) return; setDetail(null); setStreamedReport(''); setActivity([]); setError(null); setActiveId(id); }
+  function selectSession(session: SessionSummary) { if (session.id === activeId) return; seenEventsRef.current.forEach((key) => { if (key.startsWith(`${session.id}:`)) seenEventsRef.current.delete(key); }); setDetail(null); setStreamedReport(''); setActivity([]); setError(null); setActiveId(session.id); connect(session); }
 
-  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!query.trim() || submitting) return; setSubmitting(true); setError(null); try { const session = await api.create(query.trim()); setSessions((items) => [session, ...items]); selectSession(session.id); setQuery(''); setTab('activity'); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Research could not start'); } finally { setSubmitting(false); } }
-  async function startBranch(observation: Observation) { if (!detail) return; setBranching(observation.observation_id); setError(null); try { const session = await api.branch(detail.id, observation.observation_id); setSessions((items) => [session, ...items]); selectSession(session.id); setTab('activity'); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Evidence path could not start'); } finally { setBranching(null); } }
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!query.trim() || submitting) return; setSubmitting(true); setError(null); try { const session = await api.create(query.trim()); setSessions((items) => [session, ...items]); selectSession(session); setQuery(''); setTab('activity'); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Research could not start'); } finally { setSubmitting(false); } }
+  async function startBranch(observation: Observation) { if (!detail) return; setBranching(observation.observation_id); setError(null); try { const session = await api.branch(detail.id, observation.observation_id); setSessions((items) => [session, ...items]); selectSession(session); setTab('activity'); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Evidence path could not start'); } finally { setBranching(null); } }
   function newResearch() { streamRef.current?.close(); setActiveId(null); setDetail(null); setStreamedReport(''); setActivity([]); setError(null); setTab('report'); }
   const running = active && !terminal.has(active.status); const contested = detail?.evidence.filter((claim) => claim.disagreement).length ?? 0;
 
   return <main className="app-shell"><aside className="sidebar">
     <div className="brand-row"><div className="brand-mark" aria-hidden="true"><span /><span /></div><div><p className="brand-name">PARALLAX</p><p className="brand-subtitle">Evidence research</p></div></div>
     <button className="new-research" onClick={newResearch} type="button"><span aria-hidden="true">＋</span>New research</button><div className="session-heading"><span>Research sessions</span><span>{sessions.length}</span></div>
-    <nav className="session-list" aria-label="Research sessions">{roots.length === 0 && <p className="empty-sessions">No research yet. Start with a question.</p>}{roots.map((session) => <div className="session-family" key={session.id}><SessionButton active={activeId === session.id} onSelect={() => selectSession(session.id)} session={session} />{children(session.id).map((child) => <SessionButton active={activeId === child.id} child key={child.id} onSelect={() => selectSession(child.id)} session={child} />)}</div>)}</nav>
+    <nav className="session-list" aria-label="Research sessions">{roots.length === 0 && <p className="empty-sessions">No research yet. Start with a question.</p>}{roots.map((session) => <div className="session-family" key={session.id}><SessionButton active={activeId === session.id} onSelect={() => selectSession(session)} session={session} />{children(session.id).map((child) => <SessionButton active={activeId === child.id} child key={child.id} onSelect={() => selectSession(child)} session={child} />)}</div>)}</nav>
     <div className="sidebar-foot"><span className={`status-dot${configured === false ? ' offline' : ''}`} /><span>{model}</span><span className="local-pill">Local</span></div>
   </aside><section className="workspace"><header className="workspace-header"><div><p className="eyebrow">Evidence workspace</p><h1>{active?.title ?? 'Start a research thread'}</h1></div><div className="header-meta"><span className={`pulse${running ? ' running' : ''}`} aria-hidden="true" /><span>{active ? statusLabel(active.status) : configured === false ? 'Keys required' : 'Ready'}</span></div></header>
     {error && <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError(null)} type="button">Dismiss</button></div>}
