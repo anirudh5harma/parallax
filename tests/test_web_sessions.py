@@ -329,6 +329,21 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertLessEqual(len(child.query), 4_000)
         self.assertEqual(parent.id, child.parent_session_id)
 
+    def test_branch_prompt_strips_control_heavy_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            parent = service.create("Does intervention X improve outcome Y?")
+            parent.status = "completed"
+            parent.ledger = ledger()
+            parent.ledger["claims"][0]["text"] = "C\x00" * 500
+            parent.ledger["observations"][1]["excerpt"] = "E\x01" * 500
+
+            child = service.create_branch(parent.id, "O2")
+
+        self.assertLessEqual(len(child.query), 4_000)
+        self.assertNotIn("\x00", child.query)
+        self.assertNotIn("\x01", child.query)
+
     def test_supporting_observation_cannot_start_contradiction_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(

@@ -709,7 +709,16 @@ def _session_title(query: str, branch: dict[str, str] | None) -> str:
 
 
 def _branch_text(value: object, limit: int) -> str:
-    return " ".join(str(value).split()).replace("\\", "/").replace('"', "'")[:limit]
+    without_controls = "".join(
+        character
+        for character in str(value)
+        if unicodedata.category(character) not in {"Cc", "Cs"}
+    )
+    return (
+        " ".join(without_controls.split())
+        .replace("\\", "/")
+        .replace('"', "'")[:limit]
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
