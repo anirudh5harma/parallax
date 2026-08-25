@@ -110,6 +110,11 @@ def render_report(
     unknown = cited_in_text - set(context.source_urls)
     if unknown:
         raise CitationError(f"unknown source IDs: {sorted(unknown)}")
+    summary_citations = set(
+        re.findall(r"\bS\d+\b", str(payload.get("executive_summary", "")))
+    )
+    if summary_citations:
+        raise CitationError("executive summary cannot contain unscoped source IDs")
 
     sections: list[str] = [
         "# Research Report",
@@ -151,6 +156,7 @@ def render_report(
                     f"- Confidence: {claim.confidence_tag.value}",
                     f"- Support: {claim.supporting_domain_count} distinct domains",
                     f"- Contradiction: {claim.contradicting_domain_count} distinct domains",
+                    f"- Sources: {', '.join(_claim_source_ids(item))}",
                     "",
                     str(item.get("synthesis", "Evidence remains insufficient.")),
                     "",
@@ -200,6 +206,7 @@ def _render_claim_findings(
                 f"- Confidence: {claim.confidence_tag.value}",
                 f"- Support: {claim.supporting_domain_count} distinct domains",
                 f"- Contradiction: {claim.contradicting_domain_count} distinct domains",
+                f"- Sources: {', '.join(_claim_source_ids(item))}",
                 "",
                 str(item["synthesis"]),
                 "",
@@ -232,3 +239,11 @@ def _validated_claim_item(
         )
     cited.update(claim_source_ids)
     return claim
+
+
+def _claim_source_ids(item: dict[str, object]) -> list[str]:
+    source_ids = {
+        *[str(source_id) for source_id in item.get("source_ids", [])],
+        *re.findall(r"\bS\d+\b", str(item.get("synthesis", ""))),
+    }
+    return sorted(source_ids, key=lambda source_id: int(source_id[1:]))

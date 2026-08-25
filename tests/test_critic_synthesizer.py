@@ -288,6 +288,50 @@ class CriticSynthesizerTests(unittest.TestCase):
                     remaining_gaps=[],
                 )
 
+    def test_synthesis_renders_claim_local_sources(self) -> None:
+        model = FakeModel({})
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1",
+                        task_id="T1",
+                        source_url="https://example.com/a",
+                        source_domain="example.com",
+                        statement="X improves Y.",
+                        polarity=Polarity.SUPPORT,
+                        excerpt="Measured effect.",
+                    )
+                ]
+            )
+            claim = ledger.claims()[0]
+            model.handlers["final_report"] = {
+                "executive_summary": "Supported summary without unscoped citations.",
+                "main_findings": [
+                    {
+                        "claim_id": claim.claim_id,
+                        "synthesis": "Evidence supports the finding.",
+                        "source_ids": ["S1"],
+                    }
+                ],
+                "contested_findings": [],
+                "weak_evidence": [],
+                "remaining_gaps": [],
+            }
+            report = CriticSynthesizer(
+                model, BudgetManager(BudgetConfig()), audit
+            ).synthesize(
+                original_query="Query",
+                tasks=[task()],
+                claims=ledger.claims(),
+                observations=ledger.observations(),
+                remaining_gaps=[],
+            )
+
+        self.assertIn("- Sources: S1", report)
+
 
 if __name__ == "__main__":
     unittest.main()

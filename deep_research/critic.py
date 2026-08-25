@@ -249,7 +249,9 @@ class CriticSynthesizer:
             system_prompt=(
                 "You are Critic/Synthesizer, one of exactly three roles. Produce a concise "
                 "800-1800 word report. Preserve confidence tiers and disagreement. Use only "
-                "provided claim IDs and source IDs. Never create numeric confidence scores."
+                "provided claim IDs and source IDs. Put source IDs only in finding source_ids or "
+                "finding synthesis, never in the executive summary. Never create numeric "
+                "confidence scores."
             ),
             user_prompt=json.dumps(
                 {

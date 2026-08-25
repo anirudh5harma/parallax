@@ -94,7 +94,7 @@ class AppTests(unittest.TestCase):
         claim = context["structured_claims"][0]
         source_id = claim["support"][0]["source_id"]
         return {
-            "executive_summary": f"One source reports an effect [{source_id}].",
+            "executive_summary": "One source reports an effect.",
             "main_findings": [
                 {
                     "claim_id": claim["claim_id"],

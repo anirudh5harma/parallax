@@ -481,7 +481,7 @@ class HttpPageFetcher:
         timeout_seconds: float,
     ) -> tuple[int, http.client.HTTPMessage, bytes]:
         parsed = urlsplit(url)
-        host, port, address = self._resolve_safe_target(url)
+        host, port, addresses = self._resolve_safe_target(url)
         path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         headers = {
             "Host": host,
@@ -490,31 +490,41 @@ class HttpPageFetcher:
             "Accept-Encoding": "identity",
             "Connection": "close",
         }
-        if parsed.scheme == "https":
-            connection: http.client.HTTPConnection = _PinnedHTTPSConnection(
-                host,
-                address,
-                port,
-                timeout=max(0.1, timeout_seconds),
-            )
-        else:
-            connection = http.client.HTTPConnection(
-                address,
-                port,
-                timeout=max(0.1, timeout_seconds),
-            )
-        try:
-            connection.request("GET", path, headers=headers)
-            response = connection.getresponse()
-            raw = response.read(self.max_bytes + 1)
-            return response.status, response.headers, raw
-        except (TimeoutError, OSError, http.client.HTTPException) as exc:
-            raise ProviderError(f"fetch failed: {type(exc).__name__}") from exc
-        finally:
-            connection.close()
+        started = time.monotonic()
+        last_error: Exception | None = None
+        for address in addresses:
+            remaining = timeout_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                break
+            if parsed.scheme == "https":
+                connection: http.client.HTTPConnection = _PinnedHTTPSConnection(
+                    host,
+                    address,
+                    port,
+                    timeout=max(0.1, remaining),
+                )
+            else:
+                connection = http.client.HTTPConnection(
+                    address,
+                    port,
+                    timeout=max(0.1, remaining),
+                )
+            try:
+                connection.request("GET", path, headers=headers)
+                response = connection.getresponse()
+                raw = response.read(self.max_bytes + 1)
+                return response.status, response.headers, raw
+            except (TimeoutError, OSError, http.client.HTTPException) as exc:
+                last_error = exc
+            finally:
+                connection.close()
+        if timeout_seconds - (time.monotonic() - started) <= 0:
+            raise ProviderError("fetch timed out") from last_error
+        error_name = type(last_error).__name__ if last_error else "ConnectionError"
+        raise ProviderError(f"fetch failed: {error_name}") from last_error
 
     @staticmethod
-    def _resolve_safe_target(url: str) -> tuple[str, int, str]:
+    def _resolve_safe_target(url: str) -> tuple[str, int, list[str]]:
         parsed = urlsplit(url)
         host = parsed.hostname
         if parsed.username or parsed.password:
@@ -534,12 +544,12 @@ class HttpPageFetcher:
             )
         except socket.gaierror as exc:
             raise ProviderError("fetch host resolution failed") from exc
-        addresses = {target[4][0] for target in targets}
+        addresses = list(dict.fromkeys(target[4][0] for target in targets))
         if not addresses or any(
             not ipaddress.ip_address(address).is_global for address in addresses
         ):
             raise ProviderError("unsafe fetch host")
-        return host.rstrip("."), port, sorted(addresses)[0]
+        return host.rstrip("."), port, addresses
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):

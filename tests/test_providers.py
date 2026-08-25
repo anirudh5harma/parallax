@@ -173,7 +173,7 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
         with patch("deep_research.providers.socket.getaddrinfo", return_value=public):
             target = HttpPageFetcher._resolve_safe_target("https://example.com/path")
 
-        self.assertEqual(("example.com", 443, "93.184.216.34"), target)
+        self.assertEqual(("example.com", 443, ["93.184.216.34"]), target)
 
     def test_rejects_local_alias_credentials_and_nonstandard_port(self) -> None:
         for url in (

@@ -237,7 +237,7 @@ class PipelineTests(unittest.TestCase):
         claim = context["structured_claims"][0]
         source_id = claim["support"][0]["source_id"]
         return {
-            "executive_summary": f"Evidence supports a measurable effect [{source_id}].",
+            "executive_summary": "Evidence supports a measurable effect.",
             "main_findings": [
                 {
                     "claim_id": claim["claim_id"],
