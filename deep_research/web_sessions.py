@@ -17,7 +17,7 @@ from .budget import BudgetConfig
 from .cli import _worker_timeout
 
 
-TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed"}
+TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed", "rejected"}
 STREAM_END_STATUSES = TERMINAL_STATUSES | {"ready"}
 DEFAULT_OPUS_MODEL = "us.anthropic.claude-opus-4-6-v1"
 MAX_SESSION_EVENTS = 2_000
@@ -78,6 +78,16 @@ class ResearchSession:
                 },
             )
             self.status = "ready"
+
+    def reject(self, reason: str) -> None:
+        safe_reason = " ".join(reason.split())[:240]
+        with self.lock:
+            self.error = safe_reason
+            self._publish_locked(
+                "plan.rejected",
+                {"message": safe_reason},
+            )
+            self.status = "rejected"
 
     def _publish_locked(self, event: str, data: dict[str, Any]) -> None:
         event_id = self.next_event_id
@@ -417,6 +427,11 @@ class ResearchSessionService:
                 return
             payload = _read_json(plan_path)
             tasks = payload.get("tasks")
+            if payload.get("rejected") is True:
+                session.reject(
+                    str(payload.get("reason", "Please ask a researchable question."))
+                )
+                return
             if process.returncode != 0 or not isinstance(tasks, list) or len(tasks) != 4:
                 detail = "planner exited without a valid plan"
                 if process.stderr is not None:

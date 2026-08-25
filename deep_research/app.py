@@ -11,9 +11,9 @@ from .audit import JsonlAuditLogger
 from .budget import BudgetConfig, BudgetManager
 from .critic import CriticSynthesizer
 from .ledger import EvidenceLedger
-from .models import Priority, ResearchTask, TaskStatus, to_primitive
+from .models import Priority, ResearchResult, ResearchTask, TaskStatus, to_primitive
 from .pipeline import ResearchPipeline
-from .planner import Planner
+from .planner import InvalidResearchQuery, Planner
 from .providers import PageFetcher, SearchClient, StructuredModel
 from .researcher import FetchGate, Researcher
 from .urls import UrlRegistry
@@ -76,21 +76,10 @@ def run_query(
         result = pipeline.run(query, approved_tasks=approved_tasks)
         _write_json_atomic(ledger_path, ledger.dump())
         _write_text_atomic(report_path, result.report)
-        primary_ids = {task.id for task in result.tasks if task.depth == 0}
         result_errors = {
             item.task_id: item.errors for item in result.research_results if item.errors
         }
-        failed_primary_ids = {
-            task.id
-            for task in result.tasks
-            if task.id in primary_ids and task.status.value == "failed"
-        }
-        if primary_ids and failed_primary_ids == primary_ids:
-            status = "failed"
-        elif result_errors:
-            status = "completed_with_errors"
-        else:
-            status = "completed"
+        status = _completion_status(result.tasks, result.research_results)
         run_record = {
             "status": status,
             "query": query,
@@ -139,6 +128,30 @@ def run_query(
         raise
 
 
+def _completion_status(
+    tasks: list[ResearchTask],
+    results: list[ResearchResult],
+) -> str:
+    primary_ids = {task.id for task in tasks if task.depth == 0}
+    failed_primary_ids = {
+        task.id
+        for task in tasks
+        if task.id in primary_ids and task.status is TaskStatus.FAILED
+    }
+    primary_observation_count = sum(
+        len(item.observations) for item in results if item.task_id in primary_ids
+    )
+    if (
+        primary_ids
+        and failed_primary_ids == primary_ids
+        and primary_observation_count == 0
+    ):
+        return "failed"
+    if any(item.errors for item in results):
+        return "completed_with_errors"
+    return "completed"
+
+
 def create_plan(
     *,
     query: str,
@@ -148,8 +161,15 @@ def create_plan(
 ) -> list[ResearchTask]:
     output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     audit = JsonlAuditLogger(output_path.with_suffix(".events.jsonl"))
-    tasks = Planner(model, BudgetManager(config), audit).plan(query)
-    _write_json_atomic(output_path, {"query": query, "tasks": tasks})
+    try:
+        tasks = Planner(model, BudgetManager(config), audit).plan(query)
+    except InvalidResearchQuery as exc:
+        _write_json_atomic(
+            output_path,
+            {"query": query, "rejected": True, "reason": str(exc), "tasks": []},
+        )
+        return []
+    _write_json_atomic(output_path, {"query": query, "rejected": False, "tasks": tasks})
     return tasks
 
 

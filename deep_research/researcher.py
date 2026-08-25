@@ -336,7 +336,8 @@ class Researcher:
                 "You are Researcher, one of exactly three roles. Extract only atomic, "
                 "falsifiable, on-topic observations. The statement is the claim being tested; "
                 "polarity says whether this page supports or contradicts it. Excerpts must be "
-                "copied from the page. Return zero observations when evidence is weak or off-topic."
+                "copied from the page. Return at most four observations. Return zero "
+                "observations when evidence is weak or off-topic."
             ),
             user_prompt=(
                 f"Task: {task.question}\nURL: {page.url}\nTitle: {page.title}\n"

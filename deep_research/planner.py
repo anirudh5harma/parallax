@@ -11,9 +11,14 @@ from .providers import StructuredModel
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "disposition": {
+            "type": "string",
+            "enum": ["researchable", "reject"],
+        },
+        "reason": {"type": "string", "minLength": 2, "maxLength": 240},
         "tasks": {
             "type": "array",
-            "minItems": 4,
+            "minItems": 0,
             "maxItems": 4,
             "items": {
                 "type": "object",
@@ -32,9 +37,13 @@ PLAN_SCHEMA: dict[str, Any] = {
             },
         }
     },
-    "required": ["tasks"],
+    "required": ["disposition", "reason", "tasks"],
     "additionalProperties": False,
 }
+
+
+class InvalidResearchQuery(ValueError):
+    pass
 
 
 class Planner:
@@ -55,7 +64,12 @@ class Planner:
         payload = self.model.generate_json(
             system_prompt=(
                 "You are Planner, one of exactly three roles. Decompose only; do not research. "
-                "Return four focused, non-overlapping, evidence-answerable questions."
+                "First decide whether the input is a meaningful, evidence-answerable research "
+                "question. Reject gibberish, greetings, action-only requests, requests for "
+                "secrets, and instructions unrelated to research. Accept controversial or "
+                "sensitive topics when they can be researched from public evidence. For a "
+                "researchable input, return four focused, non-overlapping questions. For a "
+                "rejected input, return no tasks and a concise rewrite suggestion."
             ),
             user_prompt=(
                 f"Original query: {query}\n"
@@ -66,7 +80,15 @@ class Planner:
             schema=PLAN_SCHEMA,
             timeout_seconds=self.budget.remaining_seconds(),
         )
+        disposition = str(payload.get("disposition", "researchable"))
+        reason = str(payload.get("reason", "Ready for research"))
         raw_tasks = payload.get("tasks")
+        if disposition == "reject":
+            if raw_tasks not in ([], None):
+                raise ValueError("rejected query must not include research tasks")
+            raise InvalidResearchQuery(reason)
+        if disposition != "researchable":
+            raise ValueError("planner returned an invalid query disposition")
         if not isinstance(raw_tasks, list) or len(raw_tasks) != 4:
             raise ValueError("planner must return exactly four tasks")
         raw_shares = [float(item["page_budget_share"]) for item in raw_tasks]

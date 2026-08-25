@@ -5,7 +5,7 @@ from pathlib import Path
 from deep_research.audit import JsonlAuditLogger
 from deep_research.budget import BudgetConfig, BudgetManager
 from deep_research.models import Priority, ResearchTask, SearchResult
-from deep_research.planner import Planner
+from deep_research.planner import InvalidResearchQuery, Planner
 from deep_research.researcher import FetchGate, Researcher
 from deep_research.urls import UrlRegistry
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
@@ -48,6 +48,29 @@ class PlannerTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 planner.plan("A real research question")
+
+    def test_planner_rejects_non_research_input_without_reserving_tasks(self) -> None:
+        model = FakeModel(
+            {
+                "research_plan": {
+                    "disposition": "reject",
+                    "reason": "Ask a specific question about a topic or outcome.",
+                    "tasks": [],
+                }
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = BudgetManager(BudgetConfig())
+            planner = Planner(
+                model,
+                budget,
+                JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+            )
+
+            with self.assertRaisesRegex(InvalidResearchQuery, "specific question"):
+                planner.plan("hello")
+
+        self.assertEqual(0, budget.snapshot().primary_tasks)
 
 
 class ResearcherTests(unittest.TestCase):

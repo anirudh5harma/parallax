@@ -116,6 +116,18 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertEqual("plan.ready", events[-1]["event"])
         self.assertEqual(4, len(session.summary()["plan"]))
 
+    def test_rejected_query_is_terminal_with_rewrite_guidance(self) -> None:
+        session = ResearchSession(
+            id="session", query="hello", title="hello", created_at="now"
+        )
+
+        session.reject("Ask a specific evidence-answerable question.")
+        status, events = session.stream_snapshot(0)
+
+        self.assertEqual("rejected", status)
+        self.assertEqual("plan.rejected", events[-1]["event"])
+        self.assertIn("specific", session.error)
+
     def test_concurrent_stream_never_observes_terminal_without_final_event(self) -> None:
         session = ResearchSession(
             id="session", query="query", title="title", created_at="now",

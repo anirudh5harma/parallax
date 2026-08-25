@@ -4,13 +4,54 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deep_research.app import run_query
+from deep_research.app import _completion_status, run_query
 from deep_research.budget import BudgetConfig
-from deep_research.models import SearchResult
+from deep_research.models import (
+    EvidenceObservation,
+    Polarity,
+    Priority,
+    ResearchResult,
+    ResearchTask,
+    SearchResult,
+    TaskStatus,
+)
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 
 class AppTests(unittest.TestCase):
+    def test_partial_evidence_survives_nonfatal_task_errors(self) -> None:
+        tasks = [
+            ResearchTask(
+                id=f"T{index}",
+                question=f"Question {index}?",
+                rationale="Coverage",
+                priority=Priority.HIGH,
+                page_budget_share=0.25,
+                status=TaskStatus.FAILED,
+            )
+            for index in range(1, 5)
+        ]
+        observation = EvidenceObservation(
+            observation_id="O1",
+            task_id="T1",
+            source_url="https://example.com/a",
+            source_domain="example.com",
+            statement="A testable claim has evidence.",
+            polarity=Polarity.SUPPORT,
+            excerpt="A testable claim has evidence.",
+        )
+        results = [
+            ResearchResult(
+                task_id=task.id,
+                observations=[observation] if task.id == "T1" else [],
+                explorations=[],
+                errors=["one source failed"],
+            )
+            for task in tasks
+        ]
+
+        self.assertEqual("completed_with_errors", _completion_status(tasks, results))
+
     def test_run_writes_auditable_artifacts(self) -> None:
         model = FakeModel(
             {
