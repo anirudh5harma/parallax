@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -34,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-concurrent-fetches", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=None, help="Wall-clock seconds")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -76,6 +78,22 @@ def main(argv: list[str] | None = None) -> int:
         region = os.environ.get("AWS_REGION") or os.environ.get(
             "AWS_DEFAULT_REGION", "us-east-1"
         )
+        if not args._worker:
+            command_args = list(argv) if argv is not None else sys.argv[1:]
+            command = [sys.executable, "-m", "deep_research", *command_args, "--_worker"]
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    timeout=config.wall_clock_timeout_seconds,
+                )
+                return completed.returncode
+            except subprocess.TimeoutExpired:
+                print(
+                    "error: wall-clock timeout exhausted; worker terminated",
+                    file=sys.stderr,
+                )
+                return 2
         artifacts = run_query(
             query=args.query,
             output_root=args.output_dir,
