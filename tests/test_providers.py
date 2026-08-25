@@ -14,6 +14,66 @@ from deep_research.providers import (
 
 
 class BedrockConverseModelTests(unittest.TestCase):
+    @staticmethod
+    def _simple_response() -> dict[str, object]:
+        return {
+            "output": {"message": {"content": [{"text": '{"ok":true}'}]}}
+        }
+
+    @staticmethod
+    def _simple_schema() -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        }
+
+    def test_retries_retryable_failure_then_succeeds(self) -> None:
+        error = ProviderError("busy", retryable=True, status=429, retry_after=0)
+        with (
+            patch(
+                "deep_research.providers._post_json",
+                side_effect=[error, self._simple_response()],
+            ) as post,
+            patch("deep_research.providers.time.sleep") as sleep,
+        ):
+            result = BedrockConverseModel("secret").generate_json(
+                system_prompt="system", user_prompt="user", schema_name="result",
+                schema=self._simple_schema(), timeout_seconds=10,
+            )
+
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(2, post.call_count)
+        sleep.assert_called_once_with(0)
+
+    def test_does_not_retry_non_retryable_failure(self) -> None:
+        error = ProviderError("bad request", retryable=False, status=400)
+        with patch("deep_research.providers._post_json", side_effect=error) as post:
+            with self.assertRaises(ProviderError):
+                BedrockConverseModel("secret").generate_json(
+                    system_prompt="system", user_prompt="user", schema_name="result",
+                    schema=self._simple_schema(), timeout_seconds=10,
+                )
+
+        self.assertEqual(1, post.call_count)
+
+    def test_retry_after_is_bounded_and_attempts_are_finite(self) -> None:
+        error = ProviderError("busy", retryable=True, status=503, retry_after=99)
+        with (
+            patch("deep_research.providers._post_json", side_effect=error) as post,
+            patch("deep_research.providers.time.sleep") as sleep,
+        ):
+            with self.assertRaises(ProviderError):
+                BedrockConverseModel("secret").generate_json(
+                    system_prompt="system", user_prompt="user", schema_name="result",
+                    schema=self._simple_schema(), timeout_seconds=0.1,
+                )
+
+        self.assertEqual(2, post.call_count)
+        self.assertEqual(1, sleep.call_count)
+        self.assertLessEqual(sleep.call_args.args[0], 0.1)
+
     def test_evidence_source_type_schema_uses_supported_enum_type(self) -> None:
         from deep_research.researcher import EVIDENCE_SCHEMA
 
