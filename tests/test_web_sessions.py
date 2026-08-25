@@ -10,6 +10,7 @@ from deep_research.web_sessions import (
     ResearchSession,
     ResearchSessionService,
     SessionCapacityError,
+    SessionLaunchError,
     _public_audit_event,
     evidence_view,
 )
@@ -63,6 +64,32 @@ class EvidenceViewTests(unittest.TestCase):
 
 
 class ResearchSessionServiceTests(unittest.TestCase):
+    def test_planner_thread_launch_failure_rolls_back_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "deep_research.web_sessions.threading.Thread.start",
+            side_effect=RuntimeError("thread unavailable"),
+        ):
+            service = ResearchSessionService(output_root=Path(tmp))
+
+            with self.assertRaisesRegex(SessionLaunchError, "planner could not start"):
+                service.create("A bounded research question")
+
+        self.assertEqual([], service.list_sessions())
+
+    def test_worker_thread_launch_failure_restores_ready_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            session = service.create("A bounded research question")
+            session.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+
+            with patch(
+                "deep_research.web_sessions.threading.Thread.start",
+                side_effect=RuntimeError("thread unavailable"),
+            ), self.assertRaisesRegex(SessionLaunchError, "worker could not start"):
+                service.start(session.id)
+
+        self.assertEqual("ready", session.status)
+
     def test_active_session_capacity_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(
@@ -284,6 +311,23 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertEqual("S1", child.branch["source_id"])
         self.assertIn("independent corroboration", child.query)
         self.assertIn("Do not assume", child.query)
+
+    def test_branch_prompt_stays_inside_query_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            parent = service.create("Q" * 2_000)
+            parent.status = "completed"
+            parent.ledger = ledger()
+            parent.ledger["claims"][0]["text"] = "C" * 500
+            parent.ledger["observations"][1]["source_url"] = (
+                "https://contradict.example/" + "u" * 1_000
+            )
+            parent.ledger["observations"][1]["excerpt"] = "E" * 500
+
+            child = service.create_branch(parent.id, "O2")
+
+        self.assertLessEqual(len(child.query), 4_000)
+        self.assertEqual(parent.id, child.parent_session_id)
 
     def test_supporting_observation_cannot_start_contradiction_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

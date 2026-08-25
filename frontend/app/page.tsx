@@ -23,24 +23,34 @@ function cleanReport(report: string, evidence: EvidenceClaim[]) {
   const claimsByText = new Map(evidence.map((claim) => [claim.text, claim.claim_id]));
   const output: string[] = [];
   let claimId: string | null = null;
-  let citations: string[] = [];
+  let claimSources: string[] = [];
+  let pillsPlaced = false;
   for (const line of report.replace(/\n## Sources\s*[\s\S]*$/i, '').trim().split('\n')) {
-    if (line.startsWith('### ')) claimId = claimsByText.get(line.slice(4).trim()) ?? null;
+    if (line.startsWith('## ')) {
+      claimId = null;
+      claimSources = [];
+      pillsPlaced = false;
+    }
+    if (line.startsWith('### ')) {
+      claimId = claimsByText.get(line.slice(4).trim()) ?? null;
+      claimSources = [];
+      pillsPlaced = false;
+    }
     if (/^- (Confidence|Support|Contradiction):/i.test(line)) continue;
     if (/^- Sources:/i.test(line)) {
-      citations = [...new Set(line.match(/S\d+/g) ?? [])];
+      claimSources = [...new Set(line.match(/S\d+/g) ?? [])];
       continue;
     }
-    if (citations.length && line.trim() && !line.startsWith('#')) {
+    if (claimSources.length && line.trim() && !line.startsWith('#')) {
       const citedInline = new Set(line.match(/S\d+/g) ?? []);
       const linkedLine = claimId
-        ? line.replace(/\b(S\d+)\b/g, (sourceId) => citations.includes(sourceId) ? `[${sourceId}](#evidence-${claimId}-${sourceId})` : sourceId)
+        ? line.replace(/\b(S\d+)\b/g, (sourceId) => claimSources.includes(sourceId) ? `[${sourceId}](#evidence-${claimId}-${sourceId})` : sourceId)
         : line;
-      const pills = citations.filter((sourceId) => !citedInline.has(sourceId)).map((sourceId) => claimId
+      const pills = (pillsPlaced ? [] : claimSources.filter((sourceId) => !citedInline.has(sourceId))).map((sourceId) => claimId
         ? `[${sourceId}](#evidence-${claimId}-${sourceId})`
         : sourceId).join(' ');
+      pillsPlaced = true;
       output.push(pills ? `${linkedLine} ${pills}` : linkedLine);
-      citations = [];
       continue;
     }
     output.push(line);
@@ -110,6 +120,7 @@ export default function Home() {
     if (replayingTerminal) void loadDetail(session.id);
     const stream = new EventSource(eventStreamUrl(session.id)); streamRef.current = stream;
     let closedIntentionally = false;
+    stream.onopen = () => setError((value) => value === 'Live connection interrupted. Reconnecting…' ? null : value);
     const consume = (event: MessageEvent) => {
       const key = `${session.id}:${event.lastEventId}`;
       if (seenEventsRef.current.has(key)) return null;

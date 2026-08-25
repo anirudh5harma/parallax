@@ -18,6 +18,7 @@ from .budget import BudgetConfig
 from .web_sessions import (
     ResearchSessionService,
     SessionCapacityError,
+    SessionLaunchError,
     STREAM_END_STATUSES,
 )
 
@@ -165,6 +166,8 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
                 raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except SessionLaunchError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return session.summary()
@@ -187,6 +190,8 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
                 raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except SessionLaunchError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except ValueError as exc:
@@ -228,6 +233,8 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
                 raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except SessionLaunchError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except ValueError as exc:
