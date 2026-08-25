@@ -7,10 +7,12 @@ Small CLI research system that preserves evidence strength and disagreement inst
 Requires Python 3.11+ and two environment variables:
 
 ```bash
-export OPENAI_API_KEY="..."
+export AWS_BEARER_TOKEN_BEDROCK="..."
 export TAVILY_API_KEY="..."
 python -m deep_research "What evidence supports and challenges remote work productivity?"
 ```
+
+Optional: set `AWS_REGION` and `BEDROCK_MODEL_ID`. Defaults are `us-east-1` and `us.anthropic.claude-sonnet-4-6`.
 
 Default `dev` budget: 4 primary tasks, 2 follow-ups, 24 searches, 40 pages, 8 concurrent fetches, 5-minute timeout. Larger run:
 

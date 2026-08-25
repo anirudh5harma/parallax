@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .app import run_query
 from .budget import BudgetConfig
-from .providers import HttpPageFetcher, OpenAIResponsesModel, TavilySearchClient
+from .providers import BedrockConverseModel, HttpPageFetcher, TavilySearchClient
 
 
 class ConfigurationError(ValueError):
@@ -56,13 +56,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = config_from_args(args)
-        model_key = os.environ.get("OPENAI_API_KEY")
+        model_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
         search_key = os.environ.get("TAVILY_API_KEY")
         if not model_key or not search_key:
             missing = [
                 name
                 for name, value in (
-                    ("OPENAI_API_KEY", model_key),
+                    ("AWS_BEARER_TOKEN_BEDROCK", model_key),
                     ("TAVILY_API_KEY", search_key),
                 )
                 if not value
@@ -70,12 +70,21 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigurationError(
                 "missing required environment variables: " + ", ".join(missing)
             )
-        model_name = args.model or os.environ.get("DEEP_RESEARCH_MODEL", "gpt-5-mini")
+        model_name = args.model or os.environ.get(
+            "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6"
+        )
+        region = os.environ.get("AWS_REGION") or os.environ.get(
+            "AWS_DEFAULT_REGION", "us-east-1"
+        )
         artifacts = run_query(
             query=args.query,
             output_root=args.output_dir,
             config=config,
-            model=OpenAIResponsesModel(model_key, model=model_name),
+            model=BedrockConverseModel(
+                model_key,
+                model_id=model_name,
+                region=region,
+            ),
             search=TavilySearchClient(search_key),
             fetcher=HttpPageFetcher(),
         )

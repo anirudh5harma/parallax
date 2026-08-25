@@ -1,6 +1,8 @@
+import os
 import unittest
+from unittest.mock import patch
 
-from deep_research.cli import build_parser, config_from_args
+from deep_research.cli import build_parser, config_from_args, main
 
 
 class CliTests(unittest.TestCase):
@@ -15,6 +17,17 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["Query", "--max-pages", "401"])
         with self.assertRaises(ValueError):
             config_from_args(args)
+
+    def test_main_reports_missing_bedrock_and_search_keys(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "sys.stderr"
+        ) as stderr:
+            status = main(["Query"])
+
+        self.assertEqual(2, status)
+        message = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("AWS_BEARER_TOKEN_BEDROCK", message)
+        self.assertIn("TAVILY_API_KEY", message)
 
 
 if __name__ == "__main__":

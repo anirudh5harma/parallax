@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .models import FetchedPage, SearchResult
 from .urls import normalize_url
@@ -63,20 +63,52 @@ def _post_json(
     return data
 
 
-class OpenAIResponsesModel:
+_UNSUPPORTED_BEDROCK_SCHEMA_KEYS = {
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "maxItems",
+    "maxLength",
+    "maximum",
+    "minLength",
+    "minimum",
+    "multipleOf",
+}
+
+
+def _bedrock_schema(value: Any) -> Any:
+    """Project a schema onto Bedrock's supported structured-output subset."""
+    if isinstance(value, list):
+        return [_bedrock_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in _UNSUPPORTED_BEDROCK_SCHEMA_KEYS:
+            continue
+        if key == "minItems" and item not in (0, 1):
+            continue
+        projected[key] = _bedrock_schema(item)
+    return projected
+
+
+class BedrockConverseModel:
     def __init__(
         self,
         api_key: str,
         *,
-        model: str = "gpt-5-mini",
-        endpoint: str = "https://api.openai.com/v1/responses",
+        model_id: str = "us.anthropic.claude-sonnet-4-6",
+        region: str = "us-east-1",
+        max_tokens: int = 4096,
         max_attempts: int = 2,
     ) -> None:
         if not api_key:
             raise ValueError("API key must not be empty")
+        if not model_id or not region:
+            raise ValueError("model_id and region must not be empty")
         self.api_key = api_key
-        self.model = model
-        self.endpoint = endpoint
+        self.model_id = model_id
+        self.region = region
+        self.max_tokens = max_tokens
         self.max_attempts = max_attempts
 
     def generate_json(
@@ -88,17 +120,30 @@ class OpenAIResponsesModel:
         schema: dict[str, Any],
         timeout_seconds: float,
     ) -> dict[str, Any]:
+        endpoint = (
+            f"https://bedrock-runtime.{self.region}.amazonaws.com/model/"
+            f"{quote(self.model_id, safe='.:_-')}/converse"
+        )
         payload = {
-            "model": self.model,
-            "instructions": system_prompt,
-            "input": user_prompt,
-            "store": False,
-            "text": {
-                "format": {
+            "system": [{"text": system_prompt}],
+            "messages": [
+                {"role": "user", "content": [{"text": user_prompt}]}
+            ],
+            "inferenceConfig": {"maxTokens": self.max_tokens, "temperature": 0},
+            "outputConfig": {
+                "textFormat": {
                     "type": "json_schema",
-                    "name": schema_name,
-                    "schema": schema,
-                    "strict": True,
+                    "structure": {
+                        "jsonSchema": {
+                            "name": schema_name,
+                            "description": f"Structured output for {schema_name}",
+                            "schema": json.dumps(
+                                _bedrock_schema(schema),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    },
                 }
             },
         }
@@ -110,7 +155,7 @@ class OpenAIResponsesModel:
                 raise ProviderError("model request timed out")
             try:
                 response = _post_json(
-                    self.endpoint,
+                    endpoint,
                     payload,
                     {"Authorization": f"Bearer {self.api_key}"},
                     remaining,
@@ -125,17 +170,17 @@ class OpenAIResponsesModel:
     @staticmethod
     def _extract_json(response: dict[str, Any]) -> dict[str, Any]:
         texts: list[str] = []
-        direct = response.get("output_text")
-        if isinstance(direct, str):
-            texts.append(direct)
-        output = response.get("output", [])
-        if isinstance(output, list):
-            for item in output:
-                if not isinstance(item, dict):
-                    continue
-                for content in item.get("content", []):
-                    if isinstance(content, dict) and isinstance(content.get("text"), str):
-                        texts.append(content["text"])
+        output = response.get("output")
+        if isinstance(output, dict):
+            message = output.get("message")
+            if isinstance(message, dict):
+                content_items = message.get("content", [])
+                if isinstance(content_items, list):
+                    for content in content_items:
+                        if isinstance(content, dict) and isinstance(
+                            content.get("text"), str
+                        ):
+                            texts.append(content["text"])
         if not texts:
             raise ProviderError("model response contained no text")
         try:
