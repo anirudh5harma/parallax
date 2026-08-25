@@ -17,7 +17,7 @@ Optional: set `AWS_REGION` and `BEDROCK_MODEL_ID`. Defaults are `us-east-1` and 
 Local web workspace:
 
 ```bash
-python -m pip install -e .
+python -m pip install -e '.[dev]'
 deep-research-api
 cd frontend && npm install && npm run dev
 ```
