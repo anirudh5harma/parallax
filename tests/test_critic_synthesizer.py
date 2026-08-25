@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +28,43 @@ def task(task_id: str = "T1") -> ResearchTask:
 
 
 class CriticSynthesizerTests(unittest.TestCase):
+    def test_disputed_claim_cannot_render_as_main_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1", task_id="T1",
+                        source_url="https://support.example/a",
+                        source_domain="support.example", statement="X improves Y.",
+                        polarity=Polarity.SUPPORT, excerpt="Measured effect.",
+                    ),
+                    EvidenceObservation(
+                        observation_id="O2", task_id="T1",
+                        source_url="https://contradict.example/b",
+                        source_domain="contradict.example", statement="X improves Y.",
+                        polarity=Polarity.CONTRADICT, excerpt="No measured effect.",
+                    ),
+                ]
+            )
+            context = build_synthesis_context(
+                ledger.claims(), ledger.observations()
+            )
+            claim = ledger.claims()[0]
+            payload = {
+                "executive_summary": "Summary.",
+                "main_findings": [{
+                    "claim_id": claim.claim_id,
+                    "synthesis": "Conflicting evidence.",
+                    "source_ids": sorted(context.allowed_sources_by_claim[claim.claim_id]),
+                }],
+                "contested_findings": [], "weak_evidence": [], "remaining_gaps": [],
+            }
+
+            with self.assertRaisesRegex(ValueError, "disputed claims outside"):
+                render_report(payload, context)
+
     def test_synthesis_handles_empty_ledger_without_model_invention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
@@ -288,6 +326,45 @@ class CriticSynthesizerTests(unittest.TestCase):
 
         self.assertEqual(2, calls)
         self.assertIn("- Sources: S1", report)
+
+    def test_synthesis_repair_is_bounded_to_one_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "events.jsonl"
+            audit = JsonlAuditLogger(event_path)
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://example.com/a", source_domain="example.com",
+                    statement="X improves Y.", polarity=Polarity.SUPPORT,
+                    excerpt="Measured effect.",
+                )]
+            )
+            claim = ledger.claims()[0]
+            invalid = {
+                "executive_summary": "Summary.",
+                "main_findings": [{
+                    "claim_id": claim.claim_id,
+                    "synthesis": "Uncited finding.", "source_ids": [],
+                }],
+                "contested_findings": [], "weak_evidence": [], "remaining_gaps": [],
+            }
+            model = FakeModel({"final_report": invalid})
+
+            with self.assertRaises(CitationError):
+                CriticSynthesizer(
+                    model, BudgetManager(BudgetConfig()), audit
+                ).synthesize(
+                    original_query="Query", tasks=[task()], claims=ledger.claims(),
+                    observations=ledger.observations(), remaining_gaps=[],
+                )
+
+            events = [json.loads(line) for line in event_path.read_text().splitlines()]
+
+        self.assertEqual(2, model.calls.count("final_report"))
+        self.assertEqual(
+            1, sum(event["event"] == "synthesis.validation_retry" for event in events)
+        )
 
     def test_synthesis_rejects_uncited_claim_finding(self) -> None:
         model = FakeModel({})

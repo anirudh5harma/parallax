@@ -270,7 +270,9 @@ class CriticSynthesizer:
             "800-1800 word report. Preserve confidence tiers and disagreement. Use only "
             "provided claim IDs and source IDs. Each finding may cite only source IDs listed "
             "inside that claim's allowed_source_ids. Put source IDs only in finding source_ids "
-            "or finding synthesis, never in the executive summary. Never create numeric "
+            "or finding synthesis, never in the executive summary. Every claim whose "
+            "disagreement field is true must appear only in contested_findings; claims whose "
+            "disagreement field is false must never appear there. Never create numeric "
             "confidence scores."
         )
         report_input = {

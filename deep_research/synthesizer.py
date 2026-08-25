@@ -102,6 +102,7 @@ def render_report(
     *,
     remaining_gaps: list[str] | None = None,
 ) -> str:
+    _validate_section_membership(payload, context)
     citation_payload = {
         key: value for key, value in payload.items() if key != "remaining_gaps"
     }
@@ -184,6 +185,39 @@ def render_report(
     else:
         sections.append("- No sources cited because evidence was insufficient.")
     return "\n".join(sections).strip() + "\n"
+
+
+def _validate_section_membership(
+    payload: dict[str, object],
+    context: SynthesisContext,
+) -> None:
+    section_ids: dict[str, set[str]] = {}
+    for section in ("main_findings", "contested_findings", "weak_evidence"):
+        raw_items = payload.get(section, [])
+        if not isinstance(raw_items, list):
+            raise ValueError(f"{section} must be a list")
+        ids = {
+            str(item.get("claim_id", ""))
+            for item in raw_items
+            if isinstance(item, dict)
+        }
+        section_ids[section] = ids
+    disputed = {
+        claim_id
+        for claim_id, claim in context.claims_by_id.items()
+        if claim.disagreement_flag
+    }
+    misplaced = disputed & (
+        section_ids["main_findings"] | section_ids["weak_evidence"]
+    )
+    if misplaced:
+        raise ValueError(f"disputed claims outside contested_findings: {sorted(misplaced)}")
+    non_disputed = section_ids["contested_findings"] - disputed
+    if non_disputed:
+        raise ValueError(f"non-disputed claims in contested_findings: {sorted(non_disputed)}")
+    missing = disputed - section_ids["contested_findings"]
+    if missing:
+        raise ValueError(f"disputed claims missing from contested_findings: {sorted(missing)}")
 
 
 def _render_claim_findings(
