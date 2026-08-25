@@ -3,7 +3,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from deep_research.cli import build_parser, config_from_args, main
+from deep_research.cli import _worker_timeout, build_parser, config_from_args, main
 
 
 class CliTests(unittest.TestCase):
@@ -50,6 +50,15 @@ class CliTests(unittest.TestCase):
         self.assertTrue(command[2].endswith("/deep_research/_worker.py"))
         self.assertNotIn("-m", command)
         self.assertEqual(1, run.call_args.kwargs["timeout"])
+        self.assertLess(
+            float(run.call_args.kwargs["env"]["DEEP_RESEARCH_INTERNAL_TIMEOUT"]),
+            1,
+        )
+
+    def test_worker_timeout_reserves_cleanup_inside_ceiling(self) -> None:
+        self.assertEqual(295, _worker_timeout(300))
+        self.assertGreater(_worker_timeout(0.01), 0)
+        self.assertLess(_worker_timeout(0.01), 0.01)
 
     def test_main_terminates_worker_at_wall_clock_ceiling(self) -> None:
         with patch.dict(os.environ, self._credentials(), clear=True), patch(

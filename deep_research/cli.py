@@ -52,6 +52,11 @@ def config_from_args(args: argparse.Namespace) -> BudgetConfig:
     )
 
 
+def _worker_timeout(total_seconds: float) -> float:
+    cleanup_grace = min(5.0, max(0.05, total_seconds * 0.1))
+    return max(0.001, total_seconds - cleanup_grace)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -74,10 +79,15 @@ def main(argv: list[str] | None = None) -> int:
         command_args = list(argv) if argv is not None else sys.argv[1:]
         worker_path = Path(__file__).with_name("_worker.py").resolve()
         command = [sys.executable, "-I", str(worker_path), *command_args]
+        worker_environment = os.environ.copy()
+        worker_environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(
+            _worker_timeout(config.wall_clock_timeout_seconds)
+        )
         try:
             completed = subprocess.run(
                 command,
                 check=False,
+                env=worker_environment,
                 timeout=config.wall_clock_timeout_seconds,
             )
             return completed.returncode
@@ -99,6 +109,12 @@ def worker_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = config_from_args(args)
+        internal_timeout = os.environ.get("DEEP_RESEARCH_INTERNAL_TIMEOUT")
+        if internal_timeout is not None:
+            config = replace(
+                config,
+                wall_clock_timeout_seconds=float(internal_timeout),
+            )
         model_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
         search_key = os.environ.get("TAVILY_API_KEY")
         if not model_key or not search_key:
