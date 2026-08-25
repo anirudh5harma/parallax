@@ -134,6 +134,59 @@ class CriticSynthesizerTests(unittest.TestCase):
                     remaining_gaps=[],
                 )
 
+    def test_synthesis_rejects_cross_claim_citation(self) -> None:
+        model = FakeModel({})
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1",
+                        task_id="T1",
+                        source_url="https://example.com/a",
+                        source_domain="example.com",
+                        statement="X improves Y.",
+                        polarity=Polarity.SUPPORT,
+                        excerpt="Measured effect.",
+                    ),
+                    EvidenceObservation(
+                        observation_id="O2",
+                        task_id="T1",
+                        source_url="https://example.org/b",
+                        source_domain="example.org",
+                        statement="A different claim.",
+                        polarity=Polarity.SUPPORT,
+                        excerpt="Different evidence.",
+                    ),
+                ]
+            )
+            target_claim = next(
+                claim for claim in ledger.claims() if claim.text == "X improves Y."
+            )
+            model.handlers["final_report"] = {
+                "executive_summary": "Summary.",
+                "main_findings": [
+                    {
+                        "claim_id": target_claim.claim_id,
+                        "synthesis": "Wrongly cites another claim [S2].",
+                        "source_ids": ["S1"],
+                    }
+                ],
+                "contested_findings": [],
+                "weak_evidence": [],
+                "remaining_gaps": [],
+            }
+            critic = CriticSynthesizer(model, BudgetManager(BudgetConfig()), audit)
+            with self.assertRaises(CitationError):
+                critic.synthesize(
+                    original_query="Query",
+                    tasks=[task()],
+                    claims=ledger.claims(),
+                    observations=ledger.observations(),
+                    remaining_gaps=[],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

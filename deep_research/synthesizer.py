@@ -204,10 +204,12 @@ def _validated_claim_item(
         not isinstance(source_id, str) for source_id in source_ids
     ):
         raise CitationError("source_ids must be a string list")
-    invalid = set(source_ids) - context.allowed_sources_by_claim[claim_id]
+    text_source_ids = set(re.findall(r"\bS\d+\b", str(item.get("synthesis", ""))))
+    claim_source_ids = set(source_ids) | text_source_ids
+    invalid = claim_source_ids - context.allowed_sources_by_claim[claim_id]
     if invalid:
         raise CitationError(
             f"source IDs do not support claim {claim_id}: {sorted(invalid)}"
         )
-    cited.update(source_ids)
+    cited.update(claim_source_ids)
     return claim

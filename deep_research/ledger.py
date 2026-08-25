@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections import defaultdict
 from typing import Iterable
 
 from .audit import JsonlAuditLogger

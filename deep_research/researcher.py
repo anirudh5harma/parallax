@@ -19,7 +19,7 @@ from .models import (
     TaskStatus,
 )
 from .providers import PageFetcher, ProviderError, SearchClient, StructuredModel
-from .urls import UrlRegistry
+from .urls import UrlRegistry, normalize_url
 
 
 QUERY_SCHEMA: dict[str, Any] = {
@@ -227,8 +227,6 @@ class Researcher:
         except (BudgetExceeded, ProviderError, ValueError) as exc:
             normalized = url
             try:
-                from .urls import normalize_url
-
                 normalized = normalize_url(url)
             except ValueError:
                 pass
