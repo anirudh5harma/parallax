@@ -8,10 +8,14 @@ version = "0.1.0"
 description = "Bounded three-role research with a transparent evidence ledger"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn>=0.35,<1",
+]
 
 [project.scripts]
 deep-research = "deep_research.cli:main"
+deep-research-api = "deep_research.web_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["deep_research*"]

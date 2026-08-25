@@ -1,0 +1,456 @@
+from __future__ import annotations
+
+import atexit
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from .budget import BudgetConfig
+from .cli import _worker_timeout
+
+
+TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed"}
+DEFAULT_OPUS_MODEL = "us.anthropic.claude-opus-4-6-v1"
+
+
+@dataclass(slots=True)
+class ResearchSession:
+    id: str
+    query: str
+    title: str
+    created_at: str
+    status: str = "queued"
+    parent_session_id: str | None = None
+    branch: dict[str, str] | None = None
+    report: str | None = None
+    ledger: dict[str, Any] | None = None
+    run: dict[str, Any] | None = None
+    error: str | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def publish(self, event: str, **data: Any) -> None:
+        with self.lock:
+            self.events.append(
+                {
+                    "id": len(self.events),
+                    "event": event,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "data": data,
+                }
+            )
+
+    def event_slice(self, cursor: int) -> list[dict[str, Any]]:
+        with self.lock:
+            return [dict(item) for item in self.events[cursor:]]
+
+    def summary(self) -> dict[str, Any]:
+        with self.lock:
+            run = self.run or {}
+            ledger = self.ledger or {}
+            claims = ledger.get("claims", [])
+            return {
+                "id": self.id,
+                "query": self.query,
+                "title": self.title,
+                "created_at": self.created_at,
+                "status": self.status,
+                "parent_session_id": self.parent_session_id,
+                "branch": self.branch,
+                "claim_count": len(claims) if isinstance(claims, list) else 0,
+                "contested_count": sum(
+                    1
+                    for claim in claims
+                    if isinstance(claim, dict) and claim.get("disagreement_flag")
+                ),
+                "budget_used": run.get("budget_used"),
+                "error": self.error,
+            }
+
+    def detail(self) -> dict[str, Any]:
+        detail = self.summary()
+        with self.lock:
+            detail.update(
+                {
+                    "report": self.report,
+                    "evidence": evidence_view(self.ledger),
+                    "run": self.run,
+                }
+            )
+        return detail
+
+
+def evidence_view(ledger: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not ledger:
+        return []
+    observations = ledger.get("observations", [])
+    claims = ledger.get("claims", [])
+    if not isinstance(observations, list) or not isinstance(claims, list):
+        return []
+    urls = sorted(
+        {
+            str(item.get("source_url"))
+            for item in observations
+            if isinstance(item, dict) and item.get("source_url")
+        }
+    )
+    source_ids = {url: f"S{index}" for index, url in enumerate(urls, start=1)}
+    observations_by_id = {
+        str(item.get("observation_id")): item
+        for item in observations
+        if isinstance(item, dict) and item.get("observation_id")
+    }
+    result: list[dict[str, Any]] = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        observation_ids = [
+            *claim.get("supporting_observations", []),
+            *claim.get("contradicting_observations", []),
+            *claim.get("neutral_observations", []),
+        ]
+        claim_observations = []
+        for observation_id in observation_ids:
+            observation = observations_by_id.get(str(observation_id))
+            if observation is None:
+                continue
+            source_url = str(observation.get("source_url", ""))
+            claim_observations.append(
+                {
+                    **observation,
+                    "source_id": source_ids.get(source_url),
+                }
+            )
+        result.append(
+            {
+                "claim_id": claim.get("claim_id"),
+                "text": claim.get("text"),
+                "confidence": claim.get("confidence_tag"),
+                "disagreement": bool(claim.get("disagreement_flag")),
+                "supporting_domain_count": claim.get("supporting_domain_count", 0),
+                "contradicting_domain_count": claim.get(
+                    "contradicting_domain_count", 0
+                ),
+                "observations": claim_observations,
+            }
+        )
+    return result
+
+
+class ResearchSessionService:
+    def __init__(
+        self,
+        *,
+        output_root: Path = Path("runs/web"),
+        config: BudgetConfig | None = None,
+        model_id: str | None = None,
+        auto_start: bool = True,
+    ) -> None:
+        self.output_root = output_root.resolve()
+        self.config = config or BudgetConfig()
+        self.model_id = model_id or os.environ.get(
+            "BEDROCK_WEB_MODEL_ID", DEFAULT_OPUS_MODEL
+        )
+        self.auto_start = auto_start
+        self._sessions: dict[str, ResearchSession] = {}
+        self._processes: dict[str, subprocess.Popen] = {}
+        self._lock = threading.Lock()
+        atexit.register(self.shutdown)
+
+    def configured(self) -> bool:
+        return bool(
+            os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+            and os.environ.get("TAVILY_API_KEY")
+        )
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        with self._lock:
+            sessions = list(self._sessions.values())
+        return [
+            item.summary()
+            for item in sorted(sessions, key=lambda value: value.created_at, reverse=True)
+        ]
+
+    def get(self, session_id: str) -> ResearchSession:
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        return session
+
+    def create(
+        self,
+        query: str,
+        *,
+        parent_session_id: str | None = None,
+        branch: dict[str, str] | None = None,
+    ) -> ResearchSession:
+        normalized = " ".join(query.split())
+        if len(normalized) < 3:
+            raise ValueError("research query must contain at least 3 characters")
+        if len(normalized) > 4_000:
+            raise ValueError("research query must not exceed 4000 characters")
+        session = ResearchSession(
+            id=uuid.uuid4().hex[:12],
+            query=normalized,
+            title=_session_title(normalized, branch),
+            created_at=datetime.now(UTC).isoformat(),
+            parent_session_id=parent_session_id,
+            branch=branch,
+        )
+        session.publish("session.created", message="Research session created")
+        with self._lock:
+            self._sessions[session.id] = session
+        if self.auto_start:
+            threading.Thread(
+                target=self._run,
+                args=(session,),
+                daemon=True,
+                name=f"research-session-{session.id}",
+            ).start()
+        return session
+
+    def create_branch(self, parent_id: str, observation_id: str) -> ResearchSession:
+        parent = self.get(parent_id)
+        with parent.lock:
+            if parent.status not in {"completed", "completed_with_errors"}:
+                raise ValueError("parent research must be complete before branching")
+            evidence = evidence_view(parent.ledger)
+            original_query = parent.query
+        selected: dict[str, Any] | None = None
+        selected_claim: dict[str, Any] | None = None
+        for claim in evidence:
+            for observation in claim["observations"]:
+                if observation.get("observation_id") == observation_id:
+                    selected = observation
+                    selected_claim = claim
+                    break
+            if selected is not None:
+                break
+        if selected is None or selected_claim is None:
+            raise ValueError("observation does not exist in the parent ledger")
+        if selected.get("polarity") != "contradict":
+            raise ValueError("only contradicting evidence can start this path")
+        branch = {
+            "parent_session_id": parent_id,
+            "claim_id": str(selected_claim["claim_id"]),
+            "observation_id": str(selected["observation_id"]),
+            "source_id": str(selected["source_id"]),
+            "source_url": str(selected["source_url"]),
+            "claim_text": str(selected_claim["text"]),
+        }
+        branch_query = (
+            f"Original research question: {original_query[:2_000]}\n\n"
+            "User-selected contradiction path:\n"
+            f"Claim under dispute: {selected_claim['text']}\n"
+            f"Contradicting source: {selected['source_url']}\n"
+            f"Source excerpt: {selected['excerpt']}\n\n"
+            "Research this perspective deliberately as a new bounded session. Seek "
+            "independent corroboration and strong counterevidence. Do not assume the selected "
+            "source is correct, and preserve disagreement and remaining gaps."
+        )
+        return self.create(
+            branch_query,
+            parent_session_id=parent_id,
+            branch=branch,
+        )
+
+    def _run(self, session: ResearchSession) -> None:
+        if not self.configured():
+            self._fail(session, "Bedrock and Tavily environment variables are required")
+            return
+        session_root = self.output_root / session.id
+        session_root.mkdir(parents=True, exist_ok=False, mode=0o700)
+        worker_path = Path(__file__).with_name("_worker.py").resolve()
+        command = [
+            sys.executable,
+            "-I",
+            str(worker_path),
+            session.query,
+            "--output-dir",
+            str(session_root),
+            "--model",
+            self.model_id,
+            "--max-searches",
+            str(self.config.max_searches),
+            "--max-pages",
+            str(self.config.max_pages),
+            "--max-concurrent-fetches",
+            str(self.config.max_concurrent_fetches),
+            "--timeout",
+            str(self.config.wall_clock_timeout_seconds),
+        ]
+        environment = os.environ.copy()
+        environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(
+            _worker_timeout(self.config.wall_clock_timeout_seconds)
+        )
+        session.status = "running"
+        session.publish(
+            "session.started",
+            message="Planner is framing four evidence paths",
+            model=self.model_id,
+        )
+        process = subprocess.Popen(
+            command,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with self._lock:
+            self._processes[session.id] = process
+        started = time.monotonic()
+        event_path: Path | None = None
+        event_offset = 0
+        try:
+            while process.poll() is None:
+                event_path, event_offset = self._drain_events(
+                    session, session_root, event_path, event_offset
+                )
+                if time.monotonic() - started >= self.config.wall_clock_timeout_seconds:
+                    process.kill()
+                    process.wait()
+                    self._fail(session, "wall-clock timeout exhausted; worker terminated")
+                    return
+                time.sleep(0.15)
+            event_path, event_offset = self._drain_events(
+                session, session_root, event_path, event_offset
+            )
+            del event_path, event_offset
+            run_dirs = sorted(path for path in session_root.iterdir() if path.is_dir())
+            if not run_dirs:
+                detail = "research worker exited without artifacts"
+                if process.stderr is not None:
+                    detail = process.stderr.read(500).strip() or detail
+                self._fail(session, detail)
+                return
+            run_dir = run_dirs[-1]
+            run = _read_json(run_dir / "run.json")
+            ledger = _read_json(run_dir / "ledger.json")
+            report_path = run_dir / "report.md"
+            report = report_path.read_text(encoding="utf-8") if report_path.exists() else ""
+            with session.lock:
+                session.run = run
+                session.ledger = ledger
+                session.report = report
+                session.status = str(run.get("status", "failed"))
+                if session.status == "failed":
+                    session.error = str(run.get("error", "Research failed"))
+            if session.status == "failed":
+                session.publish(
+                    "session.failed",
+                    message=session.error or "Research failed",
+                )
+                return
+            if report:
+                for chunk in _chunks(report, 260):
+                    session.publish("report.chunk", text=chunk)
+            session.publish(
+                "session.completed",
+                message=(
+                    "Research complete with partial source failures"
+                    if session.status == "completed_with_errors"
+                    else "Research complete"
+                ),
+                status=session.status,
+            )
+        except Exception as exc:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            self._fail(session, f"{type(exc).__name__}: {exc}")
+        finally:
+            with self._lock:
+                self._processes.pop(session.id, None)
+
+    def _drain_events(
+        self,
+        session: ResearchSession,
+        session_root: Path,
+        event_path: Path | None,
+        event_offset: int,
+    ) -> tuple[Path | None, int]:
+        if event_path is None:
+            candidates = list(session_root.glob("*/events.jsonl"))
+            event_path = candidates[0] if candidates else None
+        if event_path is None or not event_path.exists():
+            return event_path, event_offset
+        with event_path.open("r", encoding="utf-8") as stream:
+            stream.seek(event_offset)
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                public_event = _public_audit_event(record)
+                if public_event is not None:
+                    session.publish("research.progress", **public_event)
+            event_offset = stream.tell()
+        return event_path, event_offset
+
+    def _fail(self, session: ResearchSession, message: str) -> None:
+        safe_message = " ".join(message.split())[:500]
+        with session.lock:
+            session.status = "failed"
+            session.error = safe_message
+        session.publish("session.failed", message=safe_message)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            processes = list(self._processes.values())
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+def _session_title(query: str, branch: dict[str, str] | None) -> str:
+    if branch:
+        return f"Path: {branch['claim_text'][:54]}"
+    first_line = query.splitlines()[0]
+    return first_line[:67] + ("…" if len(first_line) > 67 else "")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else {}
+
+
+def _chunks(value: str, size: int) -> list[str]:
+    return [value[index : index + size] for index in range(0, len(value), size)]
+
+
+def _public_audit_event(record: dict[str, Any]) -> dict[str, Any] | None:
+    event = str(record.get("event", ""))
+    data = record.get("data", {})
+    if not isinstance(data, dict):
+        data = {}
+    messages = {
+        "planner.plan_created": "Planner created four focused research questions",
+        "researcher.query_generated": "Researcher prepared a focused search",
+        "search.executed": "Search results received and URLs deduplicated",
+        "page.explored": "A source was compressed into structured evidence",
+        "page.fetch_failed": "A source could not be fetched safely",
+        "observation.extracted": "Evidence observation added to the ledger",
+        "ledger.contradiction_added": "Contradicting evidence preserved in the ledger",
+        "critic.followup_created": "Critic requested one bounded follow-up",
+        "synthesis.completed": "Final evidence report assembled",
+    }
+    message = messages.get(event)
+    if message is None:
+        return None
+    return {
+        "stage": event,
+        "message": message,
+        "task_id": data.get("task_id"),
+    }
