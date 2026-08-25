@@ -1,9 +1,13 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from deep_research.web_sessions import (
+    MAX_SESSION_EVENTS,
+    ResearchSession,
     ResearchSessionService,
+    SessionCapacityError,
     _public_audit_event,
     evidence_view,
 )
@@ -57,6 +61,77 @@ class EvidenceViewTests(unittest.TestCase):
 
 
 class ResearchSessionServiceTests(unittest.TestCase):
+    def test_active_session_capacity_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), auto_start=False, max_active_sessions=1
+            )
+            service.create("First bounded query")
+
+            with self.assertRaisesRegex(SessionCapacityError, "capacity"):
+                service.create("Second bounded query")
+
+    def test_event_retention_is_bounded_with_monotonic_ids(self) -> None:
+        session = ResearchSession(
+            id="session", query="query", title="title", created_at="now"
+        )
+        for index in range(MAX_SESSION_EVENTS + 3):
+            session.publish("event", index=index)
+
+        events = session.event_slice(0)
+        self.assertEqual(MAX_SESSION_EVENTS, len(events))
+        self.assertEqual(3, events[0]["id"])
+        self.assertEqual(MAX_SESSION_EVENTS + 2, events[-1]["id"])
+
+    def test_terminal_status_and_final_events_publish_together(self) -> None:
+        session = ResearchSession(
+            id="session", query="query", title="title", created_at="now",
+            status="running",
+        )
+        session.finish(
+            "completed",
+            [
+                ("report.chunk", {"text": "report"}),
+                ("session.completed", {"status": "completed"}),
+            ],
+        )
+
+        self.assertEqual("completed", session.status)
+        self.assertEqual(
+            ["report.chunk", "session.completed"],
+            [event["event"] for event in session.event_slice(0)],
+        )
+
+    def test_sse_capacity_is_bounded_and_released(self) -> None:
+        service = ResearchSessionService(
+            auto_start=False, max_sse_connections=1
+        )
+        self.assertTrue(service.acquire_sse())
+        self.assertFalse(service.acquire_sse())
+        service.release_sse()
+        self.assertTrue(service.acquire_sse())
+
+    def test_worker_start_failure_becomes_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            session = service.create("A bounded query")
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"AWS_BEARER_TOKEN_BEDROCK": "key", "TAVILY_API_KEY": "key"},
+                    clear=False,
+                ),
+                patch(
+                    "deep_research.web_sessions.subprocess.Popen",
+                    side_effect=OSError("startup failed"),
+                ),
+            ):
+                service._run(session)
+
+        self.assertEqual("failed", session.status)
+        self.assertEqual("session.failed", session.events[-1]["event"])
+        self.assertIn("startup failed", session.error)
+
     def test_contradiction_starts_user_directed_child_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(

@@ -4,12 +4,16 @@ import asyncio
 import json
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
-from .web_sessions import ResearchSessionService, TERMINAL_STATUSES
+from .web_sessions import ResearchSessionService, SessionCapacityError, TERMINAL_STATUSES
+
+
+LOCAL_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
 
 
 class ResearchRequest(BaseModel):
@@ -27,11 +31,22 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     app = FastAPI(title="Parallax Research API", version="0.1.0")
     app.state.sessions = sessions
     app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["localhost", "127.0.0.1", "testserver"],
+    )
+    app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_origins=sorted(LOCAL_ORIGINS),
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type", "Last-Event-ID"],
     )
+
+    @app.middleware("http")
+    async def enforce_local_origin(request: Request, call_next):
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in LOCAL_ORIGINS:
+            return PlainTextResponse("forbidden origin", status_code=403)
+        return await call_next(request)
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
@@ -54,6 +69,8 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
             )
         try:
             session = sessions.create(request.query)
+        except SessionCapacityError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return session.summary()
@@ -75,6 +92,8 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     ) -> dict[str, object]:
         try:
             session = sessions.create_branch(session_id, request.observation_id)
+        except SessionCapacityError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except ValueError as exc:
@@ -94,23 +113,28 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
             cursor = int(last_event_id) + 1 if last_event_id is not None else 0
         except ValueError:
             cursor = 0
+        if not sessions.acquire_sse():
+            raise HTTPException(status_code=429, detail="event stream capacity reached")
 
         async def events():
             nonlocal cursor
-            while True:
-                pending = session.event_slice(cursor)
-                for event in pending:
-                    cursor = int(event["id"]) + 1
-                    payload = json.dumps(event["data"], ensure_ascii=False)
-                    yield (
-                        f"id: {event['id']}\n"
-                        f"event: {event['event']}\n"
-                        f"data: {payload}\n\n"
-                    )
-                if session.status in TERMINAL_STATUSES and not session.event_slice(cursor):
-                    break
-                yield ": keepalive\n\n"
-                await asyncio.sleep(0.35)
+            try:
+                while True:
+                    pending = session.event_slice(cursor)
+                    for event in pending:
+                        cursor = int(event["id"]) + 1
+                        payload = json.dumps(event["data"], ensure_ascii=False)
+                        yield (
+                            f"id: {event['id']}\n"
+                            f"event: {event['event']}\n"
+                            f"data: {payload}\n\n"
+                        )
+                    if session.status in TERMINAL_STATUSES and not session.event_slice(cursor):
+                        break
+                    yield ": keepalive\n\n"
+                    await asyncio.sleep(0.35)
+            finally:
+                sessions.release_sse()
 
         return StreamingResponse(
             events(),

@@ -13,6 +13,9 @@ dependencies = [
   "uvicorn>=0.35,<1",
 ]
 
+[project.optional-dependencies]
+dev = ["httpx2>=2,<3"]
+
 [project.scripts]
 deep-research = "deep_research.cli:main"
 deep-research-api = "deep_research.web_cli:main"
