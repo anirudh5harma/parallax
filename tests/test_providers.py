@@ -3,7 +3,13 @@ import socket
 import unittest
 from unittest.mock import patch
 
-from deep_research.providers import BedrockConverseModel, HttpPageFetcher, ProviderError
+from deep_research.providers import (
+    BedrockConverseModel,
+    HttpPageFetcher,
+    ProviderError,
+    TavilySearchClient,
+    _NoRedirectHandler,
+)
 
 
 class BedrockConverseModelTests(unittest.TestCase):
@@ -107,6 +113,22 @@ class BedrockConverseModelTests(unittest.TestCase):
     def test_rejects_unsafe_region(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid AWS region"):
             BedrockConverseModel("secret", region="us-east-1@attacker.example")
+
+    def test_rejects_control_characters_in_api_keys(self) -> None:
+        for factory in (BedrockConverseModel, TavilySearchClient):
+            with self.subTest(factory=factory.__name__):
+                with self.assertRaisesRegex(ValueError, "printable ASCII"):
+                    factory("secret\r\nInjected: value")
+
+    def test_credentialed_provider_requests_do_not_redirect(self) -> None:
+        handler = _NoRedirectHandler()
+        self.assertIsNone(
+            handler.redirect_request(None, None, 302, "Found", {}, "https://attacker.test")
+        )
+
+    def test_tavily_rejects_untrusted_endpoint(self) -> None:
+        with self.assertRaisesRegex(ValueError, "trusted API origin"):
+            TavilySearchClient("secret", endpoint="https://attacker.test/search")
 
 
 class HttpPageFetcherSecurityTests(unittest.TestCase):

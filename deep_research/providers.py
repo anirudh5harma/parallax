@@ -35,6 +35,17 @@ class ProviderError(RuntimeError):
         self.retry_after = retry_after
 
 
+def _validate_api_key(value: str) -> None:
+    if not value or any(ord(character) < 33 or ord(character) > 126 for character in value):
+        raise ValueError("API key must be non-empty printable ASCII without whitespace")
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        del request, file_pointer, code, message, headers, new_url
+        return None
+
+
 class StructuredModel(Protocol):
     def generate_json(
         self,
@@ -63,15 +74,19 @@ def _post_json(
     headers: dict[str, str],
     timeout_seconds: float,
 ) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=max(0.1, timeout_seconds)) as response:
-            data = json.load(response)
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", **headers},
+            method="POST",
+        )
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        with opener.open(request, timeout=max(0.1, timeout_seconds)) as response:
+            raw = response.read(2_000_001)
+            if len(raw) > 2_000_000:
+                raise ProviderError("provider response exceeds byte limit")
+            data = json.loads(raw)
     except urllib.error.HTTPError as exc:
         retryable = exc.code in {408, 409, 429} or 500 <= exc.code < 600
         retry_after: float | None = None
@@ -214,8 +229,7 @@ class BedrockConverseModel:
         max_tokens: int = 4096,
         max_attempts: int = 2,
     ) -> None:
-        if not api_key:
-            raise ValueError("API key must not be empty")
+        _validate_api_key(api_key)
         if not model_id or not region:
             raise ValueError("model_id and region must not be empty")
         if not re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-\d", region):
@@ -321,8 +335,17 @@ class TavilySearchClient:
         *,
         endpoint: str = "https://api.tavily.com/search",
     ) -> None:
-        if not api_key:
-            raise ValueError("API key must not be empty")
+        _validate_api_key(api_key)
+        parsed_endpoint = urlsplit(endpoint)
+        if (
+            parsed_endpoint.scheme != "https"
+            or parsed_endpoint.hostname != "api.tavily.com"
+            or parsed_endpoint.port not in (None, 443)
+            or parsed_endpoint.path != "/search"
+            or parsed_endpoint.username
+            or parsed_endpoint.password
+        ):
+            raise ValueError("Tavily endpoint must use the trusted API origin")
         self.api_key = api_key
         self.endpoint = endpoint
 

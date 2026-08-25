@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,7 +44,7 @@ def run_query(
     query_hash = hashlib.sha256(query.strip().encode("utf-8")).hexdigest()[:8]
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     run_dir = output_root / f"{timestamp}-{query_hash}"
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
     events_path = run_dir / "events.jsonl"
     report_path = run_dir / "report.md"
     ledger_path = run_dir / "ledger.json"
@@ -147,5 +148,11 @@ def _write_json_atomic(path: Path, value: object) -> None:
 
 def _write_text_atomic(path: Path, value: str) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(value, encoding="utf-8")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(value)
     temporary.replace(path)

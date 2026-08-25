@@ -1,4 +1,5 @@
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -72,11 +73,20 @@ class AppTests(unittest.TestCase):
                 json.loads(line)["event"]
                 for line in artifacts.events_path.read_text().splitlines()
             ]
+            modes = {
+                "directory": stat.S_IMODE(artifacts.run_dir.stat().st_mode),
+                "report": stat.S_IMODE(artifacts.report_path.stat().st_mode),
+                "ledger": stat.S_IMODE(artifacts.ledger_path.stat().st_mode),
+                "events": stat.S_IMODE(artifacts.events_path.stat().st_mode),
+                "run": stat.S_IMODE(artifacts.run_path.stat().st_mode),
+            }
 
         self.assertEqual(1, len(ledger["claims"]))
         self.assertEqual("completed", run["status"])
         self.assertIn("run.completed", event_names)
         self.assertIn("page.explored", event_names)
+        self.assertEqual(0o700, modes.pop("directory"))
+        self.assertEqual({0o600}, set(modes.values()))
 
     @staticmethod
     def _report_for_prompt(prompt: str) -> dict[str, object]:
