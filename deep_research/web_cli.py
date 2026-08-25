@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import uvicorn
@@ -15,7 +16,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="deep-research-api",
         description="Local Parallax research API.",
     )
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     parser.add_argument("--max-searches", type=int, default=24)
     parser.add_argument("--max-pages", type=int, default=40)
     parser.add_argument("--max-concurrent-fetches", type=int, default=8)
@@ -23,6 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    if args.host not in {"127.0.0.1", "0.0.0.0"}:
+        parser.error("--host must be 127.0.0.1 or 0.0.0.0")
     try:
         config = BudgetConfig(
             max_searches=args.max_searches,
@@ -35,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     service = ResearchSessionService(output_root=Path("runs/web"), config=config)
     uvicorn.run(
         create_app(service),
-        host="127.0.0.1",
+        host=args.host,
         port=args.port,
     )
     return 0

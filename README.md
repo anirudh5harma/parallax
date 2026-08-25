@@ -24,6 +24,8 @@ cd frontend && npm install && npm run dev
 
 Open `http://localhost:3000`. Web research defaults to Opus 4.6 through Bedrock; override with `BEDROCK_WEB_MODEL_ID`. Sessions stay in memory and support new research paths from contradicting citations.
 
+For deployment, use `frontend/` as the Vercel root and the repository root as a Render Blueprint. Set `NEXT_PUBLIC_RESEARCH_API_URL` on Vercel. Keep Bedrock and Tavily keys on Render, then set `WEB_ALLOWED_ORIGINS` and `WEB_ALLOWED_HOSTS` to explicit production values. Add platform rate limits before exposing the no-auth API.
+
 Default `dev` budget: 4 primary tasks, 2 follow-ups, 24 searches, 40 pages, 8 concurrent fetches, 5-minute timeout. Larger run:
 
 ```bash
@@ -70,4 +72,4 @@ Tests cover hard ceilings, depth rejection, concurrency, deduplication, literal 
 
 ## V1 boundaries
 
-No agent framework, database, embeddings, auth, multi-turn memory, deep recursion, or semantic claim merging. Similar claims stay separate unless their normalized text matches exactly. Web UI is local-only in V1.
+No agent framework, database, embeddings, auth, multi-turn memory, deep recursion, or semantic claim merging. Similar claims stay separate unless their normalized text matches exactly.

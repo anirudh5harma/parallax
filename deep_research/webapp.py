@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -17,7 +18,18 @@ from .web_sessions import (
 )
 
 
-LOCAL_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
+DEFAULT_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
+DEFAULT_HOSTS = {"localhost", "127.0.0.1", "testserver"}
+
+
+def _environment_set(name: str, defaults: set[str]) -> set[str]:
+    value = os.environ.get(name)
+    if value is None:
+        return defaults
+    configured = {item.strip() for item in value.split(",") if item.strip()}
+    if not configured or "*" in configured:
+        raise ValueError(f"{name} must contain explicit values")
+    return configured
 
 
 class ResearchRequest(BaseModel):
@@ -32,25 +44,30 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     sessions = service or ResearchSessionService(
         output_root=Path("runs/web"),
     )
+    allowed_origins = _environment_set("WEB_ALLOWED_ORIGINS", DEFAULT_ORIGINS)
+    allowed_hosts = _environment_set("WEB_ALLOWED_HOSTS", DEFAULT_HOSTS)
     app = FastAPI(title="Parallax Research API", version="0.1.0")
     app.state.sessions = sessions
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["localhost", "127.0.0.1", "testserver"],
+        allowed_hosts=sorted(allowed_hosts),
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=sorted(LOCAL_ORIGINS),
+        allow_origins=sorted(allowed_origins),
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "Last-Event-ID"],
+        allow_headers=["Content-Type", "Last-Event-ID", "Cache-Control"],
     )
 
     @app.middleware("http")
     async def enforce_local_origin(request: Request, call_next):
         origin = request.headers.get("origin")
-        if origin is not None and origin not in LOCAL_ORIGINS:
+        if origin is not None and origin not in allowed_origins:
             return PlainTextResponse("forbidden origin", status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
