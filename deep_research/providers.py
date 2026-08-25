@@ -72,6 +72,15 @@ def _post_json(
     except urllib.error.HTTPError as exc:
         retryable = exc.code in {408, 409, 429} or 500 <= exc.code < 600
         retry_after: float | None = None
+        detail = ""
+        try:
+            error_body = json.loads(exc.read(16_384))
+            if isinstance(error_body, dict):
+                raw_detail = error_body.get("message") or error_body.get("Message")
+                if isinstance(raw_detail, str):
+                    detail = ": " + " ".join(raw_detail.split())[:500]
+        except (OSError, json.JSONDecodeError):
+            pass
         raw_retry_after = exc.headers.get("Retry-After") if exc.headers else None
         if raw_retry_after:
             try:
@@ -79,7 +88,7 @@ def _post_json(
             except ValueError:
                 pass
         raise ProviderError(
-            f"provider HTTP error: {exc.code}",
+            f"provider HTTP error: {exc.code}{detail}",
             retryable=retryable,
             status=exc.code,
             retry_after=retry_after,

@@ -60,8 +60,8 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
                     },
                     "excerpt": {"type": "string", "minLength": 5, "maxLength": 500},
                     "source_type": {
-                        "type": ["string", "null"],
-                        "enum": ["paper", "official", "news", "other", None],
+                        "type": "string",
+                        "enum": ["paper", "official", "news", "other"],
                     },
                 },
                 "required": ["statement", "polarity", "excerpt", "source_type"],

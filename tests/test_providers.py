@@ -6,6 +6,15 @@ from deep_research.providers import BedrockConverseModel, ProviderError
 
 
 class BedrockConverseModelTests(unittest.TestCase):
+    def test_evidence_source_type_schema_uses_supported_enum_type(self) -> None:
+        from deep_research.researcher import EVIDENCE_SCHEMA
+
+        source_type = EVIDENCE_SCHEMA["properties"]["observations"]["items"][
+            "properties"
+        ]["source_type"]
+        self.assertEqual("string", source_type["type"])
+        self.assertNotIn(None, source_type["enum"])
+
     def test_uses_bearer_auth_converse_and_supported_schema(self) -> None:
         schema = {
             "type": "object",
