@@ -27,6 +27,23 @@ def task(task_id: str = "T1") -> ResearchTask:
 
 
 class CriticSynthesizerTests(unittest.TestCase):
+    def test_synthesis_handles_empty_ledger_without_model_invention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            report = CriticSynthesizer(
+                FakeModel({}), BudgetManager(BudgetConfig()), audit
+            ).synthesize(
+                original_query="Query",
+                tasks=[task()],
+                claims=[],
+                observations=[],
+                remaining_gaps=["Primary studies were not recovered."],
+            )
+
+        self.assertIn("remains insufficient", report)
+        self.assertIn("Primary studies were not recovered.", report)
+        self.assertIn("No sources cited", report)
+
     def test_report_uses_canonical_final_critic_gaps(self) -> None:
         context = build_synthesis_context([], [])
         report = render_report(

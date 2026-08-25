@@ -245,6 +245,26 @@ class CriticSynthesizer:
         remaining_gaps: list[str],
     ) -> str:
         context = build_synthesis_context(claims, observations)
+        if not claims:
+            payload: dict[str, object] = {
+                "executive_summary": (
+                    "No page produced clear, on-topic evidence strong enough to support "
+                    "a finding. The run therefore remains insufficient rather than "
+                    "inventing a narrative."
+                ),
+                "main_findings": [],
+                "contested_findings": [],
+                "weak_evidence": [],
+                "remaining_gaps": remaining_gaps,
+            }
+            report = render_report(payload, context, remaining_gaps=remaining_gaps)
+            self.audit.log(
+                "synthesis.completed",
+                report_word_count=len(report.split()),
+                source_count=0,
+                budget=self.budget.snapshot(),
+            )
+            return report
         payload = self.model.generate_json(
             system_prompt=(
                 "You are Critic/Synthesizer, one of exactly three roles. Produce a concise "
