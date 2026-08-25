@@ -120,7 +120,7 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
             nonlocal cursor
             try:
                 while True:
-                    pending = session.event_slice(cursor)
+                    session_status, pending = session.stream_snapshot(cursor)
                     for event in pending:
                         cursor = int(event["id"]) + 1
                         payload = json.dumps(event["data"], ensure_ascii=False)
@@ -129,7 +129,7 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
                             f"event: {event['event']}\n"
                             f"data: {payload}\n\n"
                         )
-                    if session.status in TERMINAL_STATUSES and not session.event_slice(cursor):
+                    if session_status in TERMINAL_STATUSES:
                         break
                     yield ": keepalive\n\n"
                     await asyncio.sleep(0.35)

@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -101,6 +102,39 @@ class ResearchSessionServiceTests(unittest.TestCase):
             ["report.chunk", "session.completed"],
             [event["event"] for event in session.event_slice(0)],
         )
+
+    def test_concurrent_stream_never_observes_terminal_without_final_event(self) -> None:
+        session = ResearchSession(
+            id="session", query="query", title="title", created_at="now",
+            status="running",
+        )
+        reader_started = threading.Event()
+        writer_done = threading.Event()
+        snapshots: list[tuple[str, list[dict[str, object]]]] = []
+
+        def read_stream() -> None:
+            reader_started.set()
+            while not writer_done.is_set():
+                snapshots.append(session.stream_snapshot(0))
+            snapshots.append(session.stream_snapshot(0))
+
+        reader = threading.Thread(target=read_stream)
+        reader.start()
+        reader_started.wait(timeout=1)
+        session.finish(
+            "completed",
+            [
+                *[("report.chunk", {"text": str(index)}) for index in range(1_000)],
+                ("session.completed", {"status": "completed"}),
+            ],
+        )
+        writer_done.set()
+        reader.join(timeout=1)
+
+        self.assertFalse(reader.is_alive())
+        for status, events in snapshots:
+            if status in {"completed", "completed_with_errors", "failed"}:
+                self.assertIn("session.completed", [event["event"] for event in events])
 
     def test_sse_capacity_is_bounded_and_released(self) -> None:
         service = ResearchSessionService(

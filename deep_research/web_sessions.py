@@ -83,6 +83,12 @@ class ResearchSession:
         with self.lock:
             return [dict(item) for item in self.events if int(item["id"]) >= cursor]
 
+    def stream_snapshot(self, cursor: int) -> tuple[str, list[dict[str, Any]]]:
+        with self.lock:
+            return self.status, [
+                dict(item) for item in self.events if int(item["id"]) >= cursor
+            ]
+
     def summary(self) -> dict[str, Any]:
         with self.lock:
             run = self.run or {}
