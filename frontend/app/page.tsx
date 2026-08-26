@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { EvidenceClaim, Observation, SessionDetail, SessionStatus, SessionSummary, api, eventStreamUrl } from '../lib/api';
 
 type View = 'answer' | 'process';
-type Activity = { id: string; message: string; stage?: string; taskId?: string; tone?: 'warning' | 'done' };
+type Activity = { id: string; message: string; stage?: string; sourceDomain?: string; taskId?: string; tone?: 'warning' | 'done' };
 type DrawerSelection = { claim: EvidenceClaim; observation: Observation };
 const examples = [
   'How effective are GLP-1 medicines for long-term weight management, and where does evidence disagree?',
@@ -17,6 +17,13 @@ const terminal = new Set<SessionStatus>(['completed', 'completed_with_errors', '
 
 function statusLabel(status: SessionStatus) {
   return { planning: 'Creating plan', ready: 'Plan ready', queued: 'Starting', running: 'Researching', synthesizing: 'Writing answer', completed: 'Complete', completed_with_errors: 'Complete · partial', failed: 'Failed', rejected: 'Needs revision' }[status];
+}
+
+function sourceIcon(domain: string) {
+  const label = domain.split('.').at(-2) ?? domain;
+  let hue = 0;
+  for (const character of domain) hue = (hue * 31 + character.charCodeAt(0)) % 360;
+  return { initial: label[0]?.toUpperCase() ?? '·', hue };
 }
 
 function cleanReport(report: string, evidence: EvidenceClaim[]) {
@@ -125,10 +132,10 @@ export default function Home() {
       const key = `${session.id}:${event.lastEventId}`;
       if (seenEventsRef.current.has(key)) return null;
       seenEventsRef.current.add(key);
-      return JSON.parse(event.data) as { message?: string; stage?: string; text?: string; status?: SessionStatus; tasks?: SessionSummary['plan']; task_id?: string };
+      return JSON.parse(event.data) as { message?: string; source_domain?: string; stage?: string; text?: string; status?: SessionStatus; tasks?: SessionSummary['plan']; task_id?: string };
     };
-    const push = (data: { message?: string; stage?: string; task_id?: string }, event: MessageEvent, tone?: Activity['tone']) => {
-      if (data.message && activeIdRef.current === session.id) setActivity((items) => [...items, { id: `${session.id}-${event.lastEventId}`, message: data.message!, stage: data.stage, taskId: data.task_id, tone }]);
+    const push = (data: { message?: string; source_domain?: string; stage?: string; task_id?: string }, event: MessageEvent, tone?: Activity['tone']) => {
+      if (data.message && activeIdRef.current === session.id) setActivity((items) => [...items, { id: `${session.id}-${event.lastEventId}`, message: data.message!, sourceDomain: data.source_domain, stage: data.stage, taskId: data.task_id, tone }]);
     };
     stream.addEventListener('session.created', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (data) push(data, event); });
     stream.addEventListener('plan.ready', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; push(data, event, 'done'); if (!replayingTerminal) { updateSession(session.id, { status: 'ready', plan: data.tasks ?? [] }); closedIntentionally = true; stream.close(); await loadDetail(session.id); } });
@@ -172,7 +179,7 @@ export default function Home() {
   const openCitation = useCallback((claimId: string, sourceId: string) => { const selection = findCitation(detail?.evidence ?? [], claimId, sourceId); if (selection) setDrawer(selection); }, [detail]);
 
   return <main className="shell">
-    <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}><div className="brand"><span className="brand-orbit" aria-hidden="true" /><strong>Parallax</strong></div><button className="new-thread" onClick={newResearch} type="button"><span>＋</span> New research</button><p className="sidebar-label">Your research</p><nav className="history" aria-label="Research history">{orderedSessions.length === 0 && <p className="history-empty">Research sessions will appear here.</p>}{orderedSessions.map(({ session, depth }) => <SessionItem active={activeId === session.id} depth={depth} key={session.id} onClick={() => selectSession(session)} session={session} />)}</nav><div className="local-status"><span className={configured === false ? 'offline' : ''} />{configured === false ? 'API keys required' : 'Anonymous workspace'}</div></aside>
+    <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}><div className="brand"><span className="brand-orbit" aria-hidden="true" /><strong>Parallax</strong></div><button className="new-thread" onClick={newResearch} type="button"><span>＋</span> New research</button><p className="sidebar-label">Your research</p><nav className="history" aria-label="Research history">{orderedSessions.length === 0 && <p className="history-empty">Research sessions will appear here.</p>}{orderedSessions.map(({ session, depth }) => <SessionItem active={activeId === session.id} depth={depth} key={session.id} onClick={() => selectSession(session)} session={session} />)}</nav></aside>
     <button className="mobile-menu" onClick={() => setSidebarOpen((value) => !value)} type="button" aria-label="Toggle research history">☰</button>
     <section className="main-column">{error && <div className="error-banner" role="alert">{error}<button onClick={() => setError(null)} type="button">Dismiss</button></div>}{!active ? <Welcome query={query} setQuery={setQuery} submit={submit} busy={busy} configured={configured} /> : <ResearchConversation active={active} activity={activity} busy={busy} detail={detail} newResearch={newResearch} openCitation={openCitation} report={renderedReport} setView={setView} startResearch={startResearch} view={view} />}</section>
     {drawer && <EvidenceDrawer branching={branching} close={() => setDrawer(null)} selection={drawer} startBranch={startBranch} />}
@@ -194,8 +201,38 @@ function PlanReview({ plan, busy, start }: { plan: SessionSummary['plan']; busy:
 }
 
 function ResearchingState({ activity, plan }: { activity: Activity[]; plan: SessionSummary['plan'] }) {
-  const activeTasks = new Set(activity.map((item) => item.taskId).filter(Boolean));
-  return <div className="assistant-message"><span className="assistant-mark thinking">P</span><div className="research-live"><h2>Researching across sources</h2><p className="live-message"><span />{activity.at(-1)?.message ?? 'Starting parallel evidence paths…'}</p><div className="live-plan">{plan.map((task, index) => <div className={activeTasks.has(task.id) ? 'visited' : ''} key={task.id}><span>{activeTasks.has(task.id) ? '✓' : index + 1}</span><p>{task.question}</p></div>)}</div><p className="leave-note">You can leave this session. Research continues locally.</p></div></div>;
+  const [messageIndex, setMessageIndex] = useState(0);
+  const [domainIndex, setDomainIndex] = useState(0);
+  const progress = useMemo(() => {
+    const activeTasks = new Set<string>();
+    const domains: string[] = [];
+    const seenDomains = new Set<string>();
+    let searches = 0; let pages = 0; let observations = 0; let contradictions = 0;
+    for (const item of activity) {
+      if (item.taskId) activeTasks.add(item.taskId);
+      if (item.sourceDomain && !seenDomains.has(item.sourceDomain)) {
+        seenDomains.add(item.sourceDomain); domains.push(item.sourceDomain);
+      }
+      if (item.stage === 'search.executed') searches += 1;
+      else if (item.stage === 'page.explored') pages += 1;
+      else if (item.stage === 'observation.extracted') observations += 1;
+      else if (item.stage === 'ledger.contradiction_added') contradictions += 1;
+    }
+    return { activeTasks, contradictions, domains, observations, pages, searches };
+  }, [activity]);
+  const { activeTasks, contradictions, domains, observations, pages, searches } = progress;
+  const messages = [
+    searches ? `Searching broadly across ${searches} focused queries` : 'Preparing diverse searches across four evidence paths',
+    pages ? `Reading and filtering ${pages} sources for usable evidence` : 'Opening results and removing duplicate URLs',
+    observations ? `Compressing ${observations} observations into the evidence ledger` : 'Checking primary sources, methods, and counter-evidence',
+    contradictions ? `Preserving ${contradictions} conflicting findings for comparison` : 'Cross-checking support against contradicting perspectives',
+    domains.length ? `Comparing evidence across ${domains.length} independent domains` : 'Building a broad, auditable source base',
+  ];
+  useEffect(() => { const timer = window.setInterval(() => setMessageIndex((value) => (value + 1) % 5), 4200); return () => window.clearInterval(timer); }, []);
+  useEffect(() => { if (domains.length < 2) return; const timer = window.setInterval(() => setDomainIndex((value) => (value + 1) % domains.length), 2600); return () => window.clearInterval(timer); }, [domains.length]);
+  const currentDomain = domains.length ? domains[domainIndex % domains.length] : null;
+  const visibleDomains = domains.length ? Array.from({ length: Math.min(5, domains.length) }, (_, offset) => domains[(domainIndex + offset) % domains.length]) : [];
+  return <div className="assistant-message"><span className="assistant-mark thinking">P</span><div className="research-live"><h2>Researching across sources</h2><p aria-live="polite" className="live-message" key={messageIndex}><span />{messages[messageIndex % messages.length]}</p><div className="source-pulse"><div className="source-orbits" aria-hidden="true">{visibleDomains.length ? visibleDomains.map((domain) => { const icon = sourceIcon(domain); return <span key={domain} style={{ '--source-hue': icon.hue } as React.CSSProperties}>{icon.initial}</span>; }) : <><span>·</span><span>·</span><span>·</span></>}</div><div><small>{currentDomain ? 'Reading now' : 'Discovering sources'}</small><strong>{currentDomain ?? 'Finding reliable domains'}</strong></div></div><div className="research-stats"><span><strong>{searches}</strong> searches</span><span><strong>{pages}</strong> pages</span><span><strong>{observations}</strong> observations</span></div><div className="live-plan">{plan.map((task, index) => <div className={activeTasks.has(task.id) ? 'visited' : ''} key={task.id}><span>{activeTasks.has(task.id) ? '✓' : index + 1}</span><p>{task.question}</p></div>)}</div><p className="leave-note">While this one is under works, you&apos;re free to start a new research.</p></div></div>;
 }
 
 function Report({ report, evidence, openCitation, streaming }: { report: string; evidence: EvidenceClaim[]; openCitation: (claimId: string, sourceId: string) => void; streaming: boolean }) {

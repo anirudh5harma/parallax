@@ -741,7 +741,7 @@ def _public_audit_event(record: dict[str, Any]) -> dict[str, Any] | None:
     messages = {
         "planner.plan_created": "Planner created four focused research questions",
         "researcher.query_generated": "Researcher prepared a focused search",
-        "search.executed": "Search results received and URLs deduplicated",
+        "search.executed": "Search batch returned; ranking unique sources",
         "page.explored": "A source was compressed into structured evidence",
         "observation.extracted": "Evidence observation added to the ledger",
         "ledger.contradiction_added": "Contradicting evidence preserved in the ledger",
@@ -764,4 +764,5 @@ def _public_audit_event(record: dict[str, Any]) -> dict[str, Any] | None:
             r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", domain
         ):
             public["source_domain"] = domain
+            public["message"] = f"Reading evidence from {domain}"
     return public
