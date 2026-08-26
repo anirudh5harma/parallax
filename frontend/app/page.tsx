@@ -216,7 +216,7 @@ function ResearchingState({ activity, plan }: { activity: Activity[]; plan: Sess
       if (item.stage === 'search.executed') searches += 1;
       else if (item.stage === 'page.explored') pages += 1;
       else if (item.stage === 'observation.extracted') observations += 1;
-      else if (item.stage === 'ledger.contradiction_added') contradictions += 1;
+      else if (item.stage === 'ledger.contradiction_added') { contradictions += 1; observations += 1; }
     }
     return { activeTasks, contradictions, domains, observations, pages, searches };
   }, [activity]);
@@ -226,13 +226,13 @@ function ResearchingState({ activity, plan }: { activity: Activity[]; plan: Sess
     pages ? `Reading and filtering ${pages} sources for usable evidence` : 'Opening results and removing duplicate URLs',
     observations ? `Compressing ${observations} observations into the evidence ledger` : 'Checking primary sources, methods, and counter-evidence',
     contradictions ? `Preserving ${contradictions} conflicting findings for comparison` : 'Cross-checking support against contradicting perspectives',
-    domains.length ? `Comparing evidence across ${domains.length} independent domains` : 'Building a broad, auditable source base',
+    domains.length ? `Comparing evidence across ${domains.length} distinct domains` : 'Building a broad, auditable source base',
   ];
   useEffect(() => { const timer = window.setInterval(() => setMessageIndex((value) => (value + 1) % 5), 4200); return () => window.clearInterval(timer); }, []);
   useEffect(() => { if (domains.length < 2) return; const timer = window.setInterval(() => setDomainIndex((value) => (value + 1) % domains.length), 2600); return () => window.clearInterval(timer); }, [domains.length]);
   const currentDomain = domains.length ? domains[domainIndex % domains.length] : null;
   const visibleDomains = domains.length ? Array.from({ length: Math.min(5, domains.length) }, (_, offset) => domains[(domainIndex + offset) % domains.length]) : [];
-  return <div className="assistant-message"><span className="assistant-mark thinking">P</span><div className="research-live"><h2>Researching across sources</h2><p aria-live="polite" className="live-message" key={messageIndex}><span />{messages[messageIndex % messages.length]}</p><div className="source-pulse"><div className="source-orbits" aria-hidden="true">{visibleDomains.length ? visibleDomains.map((domain) => { const icon = sourceIcon(domain); return <span key={domain} style={{ '--source-hue': icon.hue } as React.CSSProperties}>{icon.initial}</span>; }) : <><span>·</span><span>·</span><span>·</span></>}</div><div><small>{currentDomain ? 'Reading now' : 'Discovering sources'}</small><strong>{currentDomain ?? 'Finding reliable domains'}</strong></div></div><div className="research-stats"><span><strong>{searches}</strong> searches</span><span><strong>{pages}</strong> pages</span><span><strong>{observations}</strong> observations</span></div><div className="live-plan">{plan.map((task, index) => <div className={activeTasks.has(task.id) ? 'visited' : ''} key={task.id}><span>{activeTasks.has(task.id) ? '✓' : index + 1}</span><p>{task.question}</p></div>)}</div><p className="leave-note">While this one is under works, you&apos;re free to start a new research.</p></div></div>;
+  return <div className="assistant-message"><span className="assistant-mark thinking">P</span><div className="research-live"><h2>Researching across sources</h2><p className="live-message" key={messageIndex}><span />{messages[messageIndex % messages.length]}</p><p className="sr-only" role="status">Research is in progress.</p><div className="source-pulse"><div className="source-orbits" aria-hidden="true">{visibleDomains.length ? visibleDomains.map((domain) => { const icon = sourceIcon(domain); return <span key={domain} style={{ '--source-hue': icon.hue } as React.CSSProperties}>{icon.initial}</span>; }) : <><span>·</span><span>·</span><span>·</span></>}</div><div><small>{currentDomain ? 'Reading now' : 'Discovering sources'}</small><strong>{currentDomain ?? 'Finding reliable domains'}</strong></div></div><div className="research-stats"><span><strong>{searches}</strong> searches</span><span><strong>{pages}</strong> pages</span><span><strong>{observations}</strong> observations</span></div><div className="live-plan">{plan.map((task, index) => <div className={activeTasks.has(task.id) ? 'visited' : ''} key={task.id}><span>{activeTasks.has(task.id) ? '✓' : index + 1}</span><p>{task.question}</p></div>)}</div><p className="leave-note">While this one is under works, you&apos;re free to start a new research.</p></div></div>;
 }
 
 function Report({ report, evidence, openCitation, streaming }: { report: string; evidence: EvidenceClaim[]; openCitation: (claimId: string, sourceId: string) => void; streaming: boolean }) {

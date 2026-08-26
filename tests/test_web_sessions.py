@@ -391,7 +391,7 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertNotIn("private-path", str(event))
         self.assertNotIn("secret-hash", str(event))
 
-    def test_fetch_failures_remain_in_audit_log_not_activity_stream(self) -> None:
+    def test_fetch_failures_expose_only_generic_progress(self) -> None:
         event = _public_audit_event(
             {
                 "event": "page.fetch_failed",
@@ -399,7 +399,8 @@ class ResearchSessionServiceTests(unittest.TestCase):
             }
         )
 
-        self.assertIsNone(event)
+        self.assertEqual("page.fetch_failed", event["stage"])
+        self.assertNotIn("application/pdf", str(event))
 
 
 if __name__ == "__main__":

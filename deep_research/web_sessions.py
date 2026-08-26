@@ -743,6 +743,7 @@ def _public_audit_event(record: dict[str, Any]) -> dict[str, Any] | None:
         "researcher.query_generated": "Researcher prepared a focused search",
         "search.executed": "Search batch returned; ranking unique sources",
         "page.explored": "A source was compressed into structured evidence",
+        "page.fetch_failed": "A source could not be opened; continuing with other results",
         "observation.extracted": "Evidence observation added to the ledger",
         "ledger.contradiction_added": "Contradicting evidence preserved in the ledger",
         "critic.followup_created": "Critic requested one bounded follow-up",

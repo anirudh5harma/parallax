@@ -14,6 +14,39 @@ from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 
 class PlannerTests(unittest.TestCase):
+    def test_planner_retries_a_stale_plan_for_current_query(self) -> None:
+        calls = 0
+
+        def plan(_prompt: str) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            period = "in 2024-2025" if calls == 1 else "through August 2026"
+            return {
+                "disposition": "researchable",
+                "reason": "Ready for research.",
+                "tasks": [
+                    {
+                        "question": f"How did market segment {index} change {period}?",
+                        "rationale": f"Track segment {index}",
+                        "priority": "high",
+                        "page_budget_share": 0.25,
+                    }
+                    for index in range(1, 5)
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "deep_research.planner.current_utc_date", return_value="2026-08-26"
+        ):
+            tasks = Planner(
+                FakeModel({"research_plan": plan}),
+                BudgetManager(BudgetConfig()),
+                JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+            ).plan("How are global markets evolving now?")
+
+        self.assertEqual(2, calls)
+        self.assertTrue(all("2026" in task.question for task in tasks))
+
     def test_planner_receives_authoritative_current_date(self) -> None:
         prompts: list[str] = []
         model = FakeModel(
@@ -119,6 +152,40 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_search_generation_retries_when_current_anchor_is_missing(self) -> None:
+        calls = 0
+
+        def queries(_prompt: str) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            query = "market evidence 2024" if calls == 1 else "latest market evidence 2026"
+            return {"queries": [{"query_text": query, "rationale": "freshness"}]}
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "deep_research.researcher.current_utc_date", return_value="2026-08-26"
+        ):
+            Researcher(
+                model=FakeModel(
+                    {"search_queries": queries, "page_evidence": {"observations": []}}
+                ),
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig(max_pages=1)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            ).research(
+                ResearchTask(
+                    id="T1",
+                    question="What is changing in markets now?",
+                    rationale="Find current evidence",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                )
+            )
+
+        self.assertEqual(2, calls)
+
     def test_search_generation_receives_authoritative_current_date(self) -> None:
         prompts: list[str] = []
         model = FakeModel(
@@ -349,10 +416,13 @@ class ResearcherTests(unittest.TestCase):
                 page_budget_share=1,
             )
             result = researcher.research(task)
+            records = [json.loads(line) for line in audit.path.read_text().splitlines()]
 
         self.assertEqual(1, budget.snapshot().pages)
         self.assertEqual([], result.observations)
         self.assertEqual(1, len(result.explorations))
+
+        self.assertEqual(1, sum(record["event"] == "page.explored" for record in records))
 
     def test_rejects_excerpt_with_changed_case(self) -> None:
         model = FakeModel(

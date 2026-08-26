@@ -150,8 +150,6 @@ class ResearchPipeline:
 
     def _write_results(self, results: list[ResearchResult]) -> None:
         for result in results:
-            for exploration in result.explorations:
-                self.audit.log("page.explored", exploration=exploration)
             self.ledger.add_observations(result.observations)
             self.audit.log(
                 "ledger.task_result_written",

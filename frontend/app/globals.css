@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .history-status.status-synthesizing{background:#7255d9}.run-status.status-synthesizing i{background:#7255d9;animation:pulse 1.2s infinite}.stream-caret{display:inline-block;width:2px;height:17px;margin-left:3px;background:#3472d0;animation:pulse .85s infinite;vertical-align:-2px}
 .run-status{background:transparent!important}
 .status-rejected{background:#d25c53}.revision>div{padding:16px;border:1px solid #efcfcc;border-radius:12px;background:#fff7f6}.revision button{margin-top:13px;padding:8px 11px;border:1px solid #d2a09b;border-radius:8px;background:#fff;color:#8d3730;font-size:10px;font-weight:620;cursor:pointer}

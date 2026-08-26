@@ -20,7 +20,7 @@ from .models import (
     TaskStatus,
 )
 from .providers import PageFetcher, ProviderError, SearchClient, StructuredModel
-from .time_context import current_utc_date
+from .time_context import current_utc_date, has_current_anchor, requires_current_evidence
 from .urls import UrlRegistry, normalize_url
 
 
@@ -240,6 +240,8 @@ class Researcher:
                 exploration, page_observations, error = future.result()
                 explorations.append(exploration)
                 observations.extend(page_observations)
+                if exploration.fetch_status is FetchStatus.FETCHED and error is None:
+                    self.audit.log("page.explored", exploration=exploration)
                 if error:
                     errors.append(error)
         except TimeoutError:
@@ -321,21 +323,33 @@ class Researcher:
             return unique
 
         queries = generate()
-        if exact and len(queries) != target:
+        current_required = requires_current_evidence(task.question, current_date)
+        missing_freshness = current_required and not has_current_anchor(
+            " ".join(query.query_text for query in queries), current_date
+        )
+        if (exact and len(queries) != target) or missing_freshness:
             self.audit.log(
                 "researcher.query_generation_retry",
                 task_id=task.id,
                 distinct_query_count=len(queries),
                 required_query_count=target,
+                missing_current_anchor=missing_freshness,
             )
             user_prompt += (
-                "\nThe previous set contained duplicate queries. Regenerate the complete set "
-                "with visibly different wording and search intent for every item."
+                "\nRegenerate the complete set with visibly different wording and search "
+                f"intent for every item. Include explicit current evidence through {current_date} "
+                "when the task is time-sensitive."
             )
             queries = generate()
         if exact and len(queries) != target:
             raise ValueError(
                 f"researcher returned {len(queries)} distinct queries; expected {target}"
+            )
+        if current_required and not has_current_anchor(
+            " ".join(query.query_text for query in queries), current_date
+        ):
+            raise ValueError(
+                "researcher queries did not preserve the task's current-time requirement"
             )
         for query in queries:
             self.audit.log("researcher.query_generated", query=query)

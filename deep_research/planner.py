@@ -6,7 +6,7 @@ from .audit import JsonlAuditLogger
 from .budget import BudgetManager
 from .models import Priority, ResearchTask
 from .providers import StructuredModel
-from .time_context import current_utc_date
+from .time_context import current_utc_date, has_current_anchor, requires_current_evidence
 
 
 PLAN_SCHEMA: dict[str, Any] = {
@@ -67,29 +67,57 @@ class Planner:
             raise ValueError("research query must not be empty")
         self.budget.check_time()
         current_date = current_utc_date()
-        payload = self.model.generate_json(
-            system_prompt=(
-                "You are Planner, one of exactly three roles. Decompose only; do not research. "
-                "First decide whether the input is a meaningful, evidence-answerable research "
-                "question. Reject gibberish, greetings, action-only requests, requests for "
-                "secrets, and instructions unrelated to research. Accept controversial or "
-                "sensitive topics when they can be researched from public evidence. For a "
-                "researchable input, return four focused, non-overlapping questions. For a "
-                "rejected input, return no tasks and a concise rewrite suggestion. Treat the "
-                "supplied current date as authoritative. For current, recent, or latest topics, "
-                "frame tasks through that date rather than relying on model memory. Do not "
-                "assume the newest available evidence; researchers must verify it on the web."
-            ),
-            user_prompt=(
-                f"Original query: {query}\n"
-                f"Current date: {current_date}\n"
-                f"Global page ceiling: {self.budget.config.max_pages}. "
-                "Allocate rough shares whose total is close to 1."
-            ),
-            schema_name="research_plan",
-            schema=PLAN_SCHEMA,
-            timeout_seconds=self.budget.remaining_seconds(),
+        system_prompt = (
+            "You are Planner, one of exactly three roles. Decompose only; do not research. "
+            "First decide whether the input is a meaningful, evidence-answerable research "
+            "question. Reject gibberish, greetings, action-only requests, requests for "
+            "secrets, and instructions unrelated to research. Accept controversial or "
+            "sensitive topics when they can be researched from public evidence. For a "
+            "researchable input, return four focused, non-overlapping questions. For a "
+            "rejected input, return no tasks and a concise rewrite suggestion. Treat the "
+            "supplied current date as authoritative. For current, recent, or latest topics, "
+            "frame tasks through that date rather than relying on model memory. Do not "
+            "assume the newest available evidence; researchers must verify it on the web."
         )
+        user_prompt = (
+            f"Original query: {query}\n"
+            f"Current date: {current_date}\n"
+            f"Global page ceiling: {self.budget.config.max_pages}. "
+            "Allocate rough shares whose total is close to 1."
+        )
+
+        def generate(prompt: str) -> dict[str, Any]:
+            return self.model.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                schema_name="research_plan",
+                schema=PLAN_SCHEMA,
+                timeout_seconds=self.budget.remaining_seconds(),
+            )
+
+        payload = generate(user_prompt)
+        raw_tasks = payload.get("tasks")
+        current_required = requires_current_evidence(query, current_date)
+        stale_plan = (
+            payload.get("disposition") == "researchable"
+            and isinstance(raw_tasks, list)
+            and not has_current_anchor(
+                " ".join(
+                    str(item.get("question", ""))
+                    for item in raw_tasks
+                    if isinstance(item, dict)
+                ),
+                current_date,
+            )
+        )
+        if current_required and stale_plan:
+            self.audit.log("planner.temporal_retry", current_date=current_date)
+            payload = generate(
+                user_prompt
+                + "\nThe previous plan lost the query's current-time intent. Regenerate all "
+                f"tasks with explicit coverage through {current_date}; historical comparisons "
+                "may remain, but cannot replace current evidence."
+            )
         disposition = str(payload["disposition"])
         reason = str(payload["reason"])
         raw_tasks = payload.get("tasks")
@@ -101,6 +129,15 @@ class Planner:
             raise ValueError("planner returned an invalid query disposition")
         if not isinstance(raw_tasks, list) or len(raw_tasks) != 4:
             raise ValueError("planner must return exactly four tasks")
+        if current_required and not has_current_anchor(
+            " ".join(
+                str(item.get("question", ""))
+                for item in raw_tasks
+                if isinstance(item, dict)
+            ),
+            current_date,
+        ):
+            raise ValueError("planner did not preserve the query's current-time requirement")
         raw_shares = [float(item["page_budget_share"]) for item in raw_tasks]
         total_share = sum(raw_shares)
         if total_share <= 0:
