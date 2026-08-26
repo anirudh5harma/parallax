@@ -63,7 +63,7 @@ Both use 12 concurrent fetches, batch page compression with literal-excerpt vali
 
 Confidence is computed in code:
 
-- **High:** at least 3 supporting domains and at most 1 contradicting domain
+- **High:** at least 3 supporting domains, including 2 paper, official, or news domains, and at most 1 contradiction
 - **Moderate:** 2 supporting domains and at most 1 contradicting domain
 - **Low:** 1 supporting domain or at least 2 contradicting domains
 - **Insufficient:** no supporting domains

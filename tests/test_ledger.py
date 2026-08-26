@@ -11,6 +11,7 @@ def observation(
     observation_id: str,
     domain: str,
     polarity: Polarity = Polarity.SUPPORT,
+    source_type: str = "paper",
 ) -> EvidenceObservation:
     return EvidenceObservation(
         observation_id=observation_id,
@@ -20,7 +21,7 @@ def observation(
         statement="Intervention X improves outcome Y.",
         polarity=polarity,
         excerpt="Study reports a measurable effect.",
-        source_type="paper",
+        source_type=source_type,
     )
 
 
@@ -74,6 +75,35 @@ class EvidenceLedgerTests(unittest.TestCase):
         self.assertTrue(claim.disagreement_flag)
         self.assertEqual("Low", claim.confidence_tag.value)
         self.assertEqual(2, claim.contradicting_domain_count)
+
+    def test_blog_only_breadth_does_not_become_high_confidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            ledger.add_observations(
+                [
+                    observation("o1", "one.example", source_type="other"),
+                    observation("o2", "two.example", source_type="other"),
+                    observation("o3", "three.example", source_type="other"),
+                ]
+            )
+            claim = ledger.claims()[0]
+
+        self.assertEqual("Moderate", claim.confidence_tag.value)
+        self.assertEqual(3, claim.supporting_domain_count)
+
+    def test_two_higher_signal_domains_restore_high_confidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            ledger.add_observations(
+                [
+                    observation("o1", "one.example", source_type="official"),
+                    observation("o2", "two.example", source_type="news"),
+                    observation("o3", "three.example", source_type="other"),
+                ]
+            )
+            claim = ledger.claims()[0]
+
+        self.assertEqual("High", claim.confidence_tag.value)
 
     def test_no_support_is_insufficient(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

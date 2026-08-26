@@ -7,6 +7,8 @@ from typing import Any, Protocol
 
 from .models import ConfidenceTag, EvidenceClaim, EvidenceObservation, Polarity
 
+HIGH_SIGNAL_SOURCE_TYPES = {"paper", "official", "news"}
+
 
 class AuditSink(Protocol):
     def log(self, event: str, **data: Any) -> None: ...
@@ -66,6 +68,14 @@ class EvidenceLedger:
             self._observations[item].source_domain
             for item in claim.contradicting_observations
         }
+        higher_signal_support_domains = {
+            observation.source_domain
+            for item in claim.supporting_observations
+            if (
+                (observation := self._observations[item]).source_type is None
+                or observation.source_type in HIGH_SIGNAL_SOURCE_TYPES
+            )
+        }
         claim.supporting_domain_count = len(support_domains)
         claim.contradicting_domain_count = len(contradiction_domains)
         claim.disagreement_flag = bool(support_domains and contradiction_domains)
@@ -74,7 +84,7 @@ class EvidenceLedger:
             claim.confidence_tag = ConfidenceTag.INSUFFICIENT
         elif len(contradiction_domains) >= 2:
             claim.confidence_tag = ConfidenceTag.LOW
-        elif len(support_domains) >= 3:
+        elif len(support_domains) >= 3 and len(higher_signal_support_domains) >= 2:
             claim.confidence_tag = ConfidenceTag.HIGH
         elif len(support_domains) >= 2:
             claim.confidence_tag = ConfidenceTag.MODERATE
@@ -92,8 +102,13 @@ class EvidenceLedger:
     def dump(self) -> dict[str, object]:
         return {
             "confidence_rules": {
-                "High": "at least 3 supporting domains and at most 1 contradicting domain",
-                "Moderate": "2 supporting domains and at most 1 contradicting domain",
+                "High": (
+                    "at least 3 supporting domains, including at least 2 paper, official, "
+                    "or news domains, and at most 1 contradicting domain"
+                ),
+                "Moderate": (
+                    "at least 2 supporting domains and at most 1 contradicting domain"
+                ),
                 "Low": "1 supporting domain or at least 2 contradicting domains",
                 "Insufficient": "no supporting domains",
             },
