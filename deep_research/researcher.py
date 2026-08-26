@@ -419,10 +419,10 @@ class Researcher:
         if not isinstance(raw_observations, list) or len(raw_observations) > 8:
             raise ValueError("invalid observation list")
         accepted: list[EvidenceObservation] = []
-        normalized_page = " ".join(page.text.split()).casefold()
+        normalized_page = " ".join(page.text.split())
         for item in raw_observations:
             excerpt = " ".join(str(item["excerpt"]).split())
-            if excerpt.casefold() not in normalized_page:
+            if excerpt not in normalized_page:
                 self.audit.log(
                     "observation.rejected",
                     task_id=task.id,

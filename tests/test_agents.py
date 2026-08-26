@@ -282,6 +282,46 @@ class ResearcherTests(unittest.TestCase):
         self.assertEqual([], result.observations)
         self.assertEqual(1, len(result.explorations))
 
+    def test_rejects_excerpt_with_changed_case(self) -> None:
+        model = FakeModel(
+            {
+                "search_queries": {
+                    "queries": [{"query_text": "query", "rationale": "coverage"}]
+                },
+                "page_evidence": {
+                    "observations": [
+                        {
+                            "statement": "The source reports an effect.",
+                            "polarity": "support",
+                            "excerpt": "source text for https://example.com/a.",
+                            "source_type": "other",
+                        }
+                    ]
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([SearchResult("https://example.com/a", "A")]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig()),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            )
+            result = researcher.research(
+                ResearchTask(
+                    id="T1",
+                    question="Does the source report an effect?",
+                    rationale="Check literal evidence",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                )
+            )
+
+        self.assertEqual([], result.observations)
+
     def test_fetch_concurrency_obeys_shared_gate(self) -> None:
         model = FakeModel(
             {
