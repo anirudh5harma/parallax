@@ -64,6 +64,24 @@ class EvidenceViewTests(unittest.TestCase):
 
 
 class ResearchSessionServiceTests(unittest.TestCase):
+    def test_failure_exposes_safe_structured_error(self) -> None:
+        service = ResearchSessionService(auto_start=False)
+        session = service.create("A bounded research question")
+
+        service._fail(
+            session,
+            "The Tavily usage limit is exhausted.",
+            code="tavily_quota_exhausted",
+        )
+
+        summary = session.summary()
+        self.assertEqual("failed", summary["status"])
+        self.assertEqual("tavily_quota_exhausted", summary["error_code"])
+        self.assertEqual("The Tavily usage limit is exhausted.", summary["error"])
+        self.assertEqual(
+            "tavily_quota_exhausted", session.events[-1]["data"]["error_code"]
+        )
+
     def test_planner_thread_launch_failure_rolls_back_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch(
             "deep_research.web_sessions.threading.Thread.start",

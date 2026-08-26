@@ -30,11 +30,15 @@ class ProviderError(RuntimeError):
         retryable: bool = True,
         status: int | None = None,
         retry_after: float | None = None,
+        code: str = "provider_unavailable",
+        public_message: str = "A research provider is temporarily unavailable.",
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.status = status
         self.retry_after = retry_after
+        self.code = code
+        self.public_message = public_message
 
 
 class SchemaValidationError(ProviderError):
@@ -121,17 +125,86 @@ def _post_json(
                 retry_after = max(0.0, float(raw_retry_after))
             except ValueError:
                 pass
+        code, public_message = _provider_http_failure(url, exc.code, detail)
         raise ProviderError(
             f"provider HTTP error: {exc.code}{detail}",
             retryable=retryable,
             status=exc.code,
             retry_after=retry_after,
+            code=code,
+            public_message=public_message,
         ) from exc
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise ProviderError(f"request failed: {type(exc).__name__}") from exc
     if not isinstance(data, dict):
         raise ProviderError("provider returned non-object JSON")
     return data
+
+
+def _provider_http_failure(url: str, status: int, detail: str) -> tuple[str, str]:
+    """Map provider failures to stable, secret-free UI errors."""
+    host = urlsplit(url).hostname or ""
+    normalized_detail = detail.casefold()
+    if host.startswith("bedrock-runtime."):
+        if status in {401, 403}:
+            return (
+                "bedrock_access_denied",
+                "Model access is unavailable. Check the Bedrock key, model access, and AWS region.",
+            )
+        if status == 402 or "servicequotaexceeded" in normalized_detail:
+            return (
+                "bedrock_quota_exhausted",
+                "The Bedrock service quota is exhausted. Increase the quota or try again later.",
+            )
+        if status == 429:
+            return (
+                "bedrock_rate_limited",
+                "Bedrock is rate-limiting this workspace. Wait briefly, then retry.",
+            )
+        return "bedrock_unavailable", "Bedrock is temporarily unavailable. Try again shortly."
+    if host == "api.tavily.com":
+        if status in {401, 403}:
+            return (
+                "tavily_access_denied",
+                "Web search access is unavailable. Check the Tavily API key.",
+            )
+        if status in {432, 433}:
+            return (
+                "tavily_quota_exhausted",
+                "The Tavily usage limit is exhausted. Increase the plan limit or wait for reset.",
+            )
+        if status == 429:
+            return (
+                "tavily_rate_limited",
+                "Web search is rate-limited. Wait briefly, then retry.",
+            )
+        return "tavily_unavailable", "Web search is temporarily unavailable. Try again shortly."
+    return "provider_unavailable", "A research provider is temporarily unavailable."
+
+
+def _post_json_with_retry(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout_seconds: float,
+    *,
+    max_attempts: int = 2,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    last_error: ProviderError | None = None
+    for attempt in range(max_attempts):
+        remaining = timeout_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            break
+        try:
+            return _post_json(url, payload, headers, remaining)
+        except ProviderError as exc:
+            last_error = exc
+            if not exc.retryable or attempt + 1 >= max_attempts:
+                break
+            delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
+            time.sleep(min(delay, 5.0, max(0.0, remaining)))
+    raise last_error or ProviderError("provider request timed out")
 
 
 _UNSUPPORTED_BEDROCK_SCHEMA_KEYS = {
@@ -407,7 +480,7 @@ class TavilySearchClient:
     def search(
         self, query: str, *, max_results: int, timeout_seconds: float
     ) -> list[SearchResult]:
-        response = _post_json(
+        response = _post_json_with_retry(
             self.endpoint,
             {
                 "query": query,
@@ -475,7 +548,7 @@ class TavilyExtractClient:
     ) -> list[FetchedPage]:
         if not 1 <= len(urls) <= 20:
             raise ValueError("Tavily extraction batch must contain 1-20 URLs")
-        response = _post_json(
+        response = _post_json_with_retry(
             self.endpoint,
             {
                 "urls": urls,

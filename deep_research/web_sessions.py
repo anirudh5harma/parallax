@@ -50,6 +50,7 @@ class ResearchSession:
     ledger: dict[str, Any] | None = None
     run: dict[str, Any] | None = None
     error: str | None = None
+    error_code: str | None = None
     plan: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     next_event_id: int = 0
@@ -65,11 +66,13 @@ class ResearchSession:
         events: list[tuple[str, dict[str, Any]]],
         *,
         error: str | None = None,
+        error_code: str | None = None,
     ) -> None:
         if status not in TERMINAL_STATUSES:
             raise ValueError("finish requires a terminal status")
         with self.lock:
             self.error = error
+            self.error_code = error_code
             for event, data in events:
                 self._publish_locked(event, data)
             self.status = status
@@ -149,6 +152,7 @@ class ResearchSession:
                 ),
                 "budget_used": run.get("budget_used"),
                 "error": self.error,
+                "error_code": self.error_code,
                 "plan": [dict(task) for task in self.plan],
             }
 
@@ -508,6 +512,13 @@ class ResearchSessionService:
                 )
                 return
             if process.returncode != 0 or not isinstance(tasks, list) or len(tasks) != 4:
+                if payload.get("status") == "failed":
+                    self._fail(
+                        session,
+                        str(payload.get("error", "Research planning could not complete.")),
+                        code=str(payload.get("error_code", "provider_unavailable")),
+                    )
+                    return
                 detail = "planner exited without a valid plan"
                 if process.stderr is not None:
                     detail = process.stderr.read(500).strip() or detail
@@ -611,16 +622,23 @@ class ResearchSessionService:
                 if final_status == "failed"
                 else None
             )
+            final_error_code = (
+                str(run.get("error_code", "research_failed"))
+                if final_status == "failed"
+                else None
+            )
             with session.lock:
                 session.run = run
                 session.ledger = ledger
                 session.report = report
                 session.error = final_error
+                session.error_code = final_error_code
             if final_status == "failed":
                 session.finish(
                     "failed",
                     [("session.failed", {"message": final_error or "Research failed"})],
                     error=final_error,
+                    error_code=final_error_code,
                 )
                 return
             with session.lock:
@@ -685,12 +703,20 @@ class ResearchSessionService:
             event_offset = stream.tell()
         return event_path, event_offset
 
-    def _fail(self, session: ResearchSession, message: str) -> None:
+    def _fail(
+        self,
+        session: ResearchSession,
+        message: str,
+        *,
+        code: str = "research_failed",
+    ) -> None:
         safe_message = " ".join(message.split())[:500]
+        safe_code = re.sub(r"[^a-z0-9_]", "", code.casefold())[:64] or "research_failed"
         session.finish(
             "failed",
-            [("session.failed", {"message": safe_message})],
+            [("session.failed", {"message": safe_message, "error_code": safe_code})],
             error=safe_message,
+            error_code=safe_code,
         )
 
     def shutdown(self) -> None:

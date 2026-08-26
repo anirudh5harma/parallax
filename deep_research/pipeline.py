@@ -9,6 +9,7 @@ from .budget import BudgetManager
 from .critic import CriticSynthesizer
 from .ledger import EvidenceLedger
 from .models import Critique, ResearchResult, ResearchTask, TaskStatus
+from .providers import ProviderError
 from .planner import Planner
 from .researcher import Researcher
 
@@ -118,7 +119,11 @@ class ResearchPipeline:
                     results.append(future.result())
                 except Exception as exc:
                     task.status = TaskStatus.FAILED
-                    message = f"{type(exc).__name__}: {exc}"
+                    message = (
+                        exc.public_message
+                        if isinstance(exc, ProviderError)
+                        else f"{type(exc).__name__}: {exc}"
+                    )
                     self.audit.log("researcher.task_failed", task_id=task.id, error=message)
                     results.append(
                         ResearchResult(
@@ -126,6 +131,9 @@ class ResearchPipeline:
                             observations=[],
                             explorations=[],
                             errors=[message],
+                            error_code=(
+                                exc.code if isinstance(exc, ProviderError) else "research_failed"
+                            ),
                         )
                     )
         except TimeoutError:

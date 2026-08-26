@@ -14,7 +14,13 @@ from .ledger import EvidenceLedger
 from .models import Priority, ResearchResult, ResearchTask, TaskStatus, to_primitive
 from .pipeline import ResearchPipeline
 from .planner import InvalidResearchQuery, Planner
-from .providers import BatchPageExtractor, PageFetcher, SearchClient, StructuredModel
+from .providers import (
+    BatchPageExtractor,
+    PageFetcher,
+    ProviderError,
+    SearchClient,
+    StructuredModel,
+)
 from .researcher import FetchGate, Researcher
 from .urls import UrlRegistry
 
@@ -93,6 +99,19 @@ def run_query(
             "domain_counts": urls.domain_counts(),
             "research_errors": result_errors,
         }
+        if status == "failed":
+            failure = next(
+                (item for item in result.research_results if item.errors),
+                None,
+            )
+            run_record["error"] = (
+                failure.errors[0] if failure is not None else "Research could not complete."
+            )
+            run_record["error_code"] = (
+                (failure.error_code or "research_failed")
+                if failure is not None
+                else "research_failed"
+            )
         _write_json_atomic(run_path, run_record)
         audit.log(
             "run.completed" if status != "failed" else "run.failed",
@@ -112,6 +131,10 @@ def run_query(
         )
     except Exception as exc:
         audit.log("run.failed", error_type=type(exc).__name__, error=str(exc))
+        public_error = (
+            exc.public_message if isinstance(exc, ProviderError) else "Research could not complete."
+        )
+        error_code = exc.code if isinstance(exc, ProviderError) else "research_failed"
         _write_json_atomic(
             ledger_path,
             ledger.dump(),
@@ -124,7 +147,8 @@ def run_query(
                 "budget_config": config,
                 "budget_used": budget.snapshot(),
                 "error_type": type(exc).__name__,
-                "error": str(exc),
+                "error": public_error,
+                "error_code": error_code,
             },
         )
         raise
@@ -171,6 +195,18 @@ def create_plan(
             {"query": query, "rejected": True, "reason": str(exc), "tasks": []},
         )
         return []
+    except ProviderError as exc:
+        _write_json_atomic(
+            output_path,
+            {
+                "query": query,
+                "status": "failed",
+                "error": exc.public_message,
+                "error_code": exc.code,
+                "tasks": [],
+            },
+        )
+        raise
     _write_json_atomic(output_path, {"query": query, "rejected": False, "tasks": tasks})
     return tasks
 

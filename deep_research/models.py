@@ -162,6 +162,7 @@ class ResearchResult:
     observations: list[EvidenceObservation]
     explorations: list[PageExploration]
     errors: list[str]
+    error_code: str | None = None
 
 
 def to_primitive(value: Any) -> Any:

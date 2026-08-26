@@ -250,7 +250,8 @@ class Researcher:
         self._raise_if_cancelled(cancellation)
         task.status = TaskStatus.RUNNING
         errors: list[str] = []
-        search_failures: list[str] = []
+        search_failures: list[ProviderError] = []
+        error_code: str | None = None
         explorations: list[PageExploration] = []
         observations: list[EvidenceObservation] = []
         page_cap = max(1, math.ceil(self.budget.config.max_pages * task.page_budget_share))
@@ -284,7 +285,7 @@ class Researcher:
                 self.audit.log("search.failed", task_id=task.id, error=str(exc))
                 break
             except ProviderError as exc:
-                search_failures.append(str(exc))
+                search_failures.append(exc)
                 self.audit.log("search.failed", task_id=task.id, error=str(exc))
                 continue
             for result in results:
@@ -339,11 +340,22 @@ class Researcher:
 
         prefetched: list[FetchedPage] = []
         if self.batch_extractor is not None:
-            prefetched, failed = self._batch_extract(task, candidates, cancellation)
+            prefetched, failed, batch_provider_error = self._batch_extract(
+                task, candidates, cancellation
+            )
             for exploration, error in failed:
                 explorations.append(exploration)
             if candidates and not prefetched:
-                errors.append("no selected sources could be extracted")
+                errors.append(
+                    batch_provider_error.public_message
+                    if batch_provider_error is not None
+                    else "No selected sources could be extracted."
+                )
+                error_code = (
+                    batch_provider_error.code
+                    if batch_provider_error is not None
+                    else "tavily_unavailable"
+                )
 
         executor = ThreadPoolExecutor(max_workers=self.budget.config.max_concurrent_fetches)
         futures: list[Future[tuple[PageExploration, list[EvidenceObservation], str | None]]] = [
@@ -388,7 +400,9 @@ class Researcher:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
         if queries and search_failures and len(search_failures) == len(queries):
-            errors.append("all searches failed")
+            failure = search_failures[-1]
+            errors.append(failure.public_message)
+            error_code = failure.code
         if not cancellation.is_set():
             task.status = TaskStatus.COMPLETED if not errors else TaskStatus.FAILED
         return ResearchResult(
@@ -396,6 +410,7 @@ class Researcher:
             observations=observations,
             explorations=explorations,
             errors=errors,
+            error_code=error_code,
         )
 
     def _generate_queries(
@@ -502,10 +517,12 @@ class Researcher:
     ) -> tuple[
         list[FetchedPage],
         list[tuple[PageExploration, str]],
+        ProviderError | None,
     ]:
         assert self.batch_extractor is not None
         pages: list[FetchedPage] = []
         failures: list[tuple[PageExploration, str]] = []
+        provider_error: ProviderError | None = None
         for offset in range(0, len(candidates), 20):
             self._raise_if_cancelled(cancellation)
             batch: list[_Candidate] = []
@@ -514,7 +531,7 @@ class Researcher:
                     self.budget.reserve_page()
                 except BudgetExceeded as exc:
                     failures.append((self._failed_exploration(task, candidate), str(exc)))
-                    return pages, failures
+                    return pages, failures, provider_error
                 batch.append(candidate)
             if not batch:
                 break
@@ -526,6 +543,8 @@ class Researcher:
                     timeout_seconds=self.budget.remaining_seconds(),
                 )
             except (ProviderError, ValueError, BudgetExceeded) as exc:
+                if isinstance(exc, ProviderError):
+                    provider_error = exc
                 for candidate in batch:
                     exploration = self._failed_exploration(task, candidate)
                     self.audit.log("page.fetch_failed", exploration=exploration, error=str(exc))
@@ -554,7 +573,7 @@ class Researcher:
                 exploration = self._failed_exploration(task, candidate)
                 self.audit.log("page.fetch_failed", exploration=exploration, error=error)
                 failures.append((exploration, error))
-        return pages, failures
+        return pages, failures, provider_error
 
     @staticmethod
     def _failed_exploration(

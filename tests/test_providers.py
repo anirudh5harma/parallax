@@ -12,10 +12,29 @@ from deep_research.providers import (
     TavilyExtractClient,
     TavilySearchClient,
     _NoRedirectHandler,
+    _provider_http_failure,
 )
 
 
 class BedrockConverseModelTests(unittest.TestCase):
+    def test_provider_failures_have_stable_public_codes(self) -> None:
+        self.assertEqual(
+            ("bedrock_access_denied", "Model access is unavailable. Check the Bedrock key, model access, and AWS region."),
+            _provider_http_failure(
+                "https://bedrock-runtime.us-east-1.amazonaws.com/model/x/converse",
+                403,
+                ": denied",
+            ),
+        )
+        self.assertEqual(
+            ("tavily_quota_exhausted", "The Tavily usage limit is exhausted. Increase the plan limit or wait for reset."),
+            _provider_http_failure("https://api.tavily.com/search", 432, ": limit"),
+        )
+        self.assertEqual(
+            ("tavily_rate_limited", "Web search is rate-limited. Wait briefly, then retry."),
+            _provider_http_failure("https://api.tavily.com/search", 429, ": busy"),
+        )
+
     @staticmethod
     def _simple_response() -> dict[str, object]:
         return {
@@ -242,6 +261,30 @@ class BedrockConverseModelTests(unittest.TestCase):
     def test_tavily_rejects_untrusted_endpoint(self) -> None:
         with self.assertRaisesRegex(ValueError, "trusted API origin"):
             TavilySearchClient("secret", endpoint="https://attacker.test/search")
+
+    def test_tavily_retries_rate_limit_once(self) -> None:
+        limited = ProviderError(
+            "limited",
+            retryable=True,
+            status=429,
+            retry_after=0,
+            code="tavily_rate_limited",
+            public_message="Web search is rate-limited. Wait briefly, then retry.",
+        )
+        with (
+            patch(
+                "deep_research.providers._post_json",
+                side_effect=[limited, {"results": []}],
+            ) as post,
+            patch("deep_research.providers.time.sleep") as sleep,
+        ):
+            results = TavilySearchClient("secret").search(
+                "query", max_results=5, timeout_seconds=10
+            )
+
+        self.assertEqual([], results)
+        self.assertEqual(2, post.call_count)
+        sleep.assert_called_once_with(0)
 
 
 class TavilyExtractClientTests(unittest.TestCase):

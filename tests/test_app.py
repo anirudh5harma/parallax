@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deep_research.app import _completion_status, run_query
+from deep_research.app import _completion_status, create_plan, run_query
 from deep_research.budget import BudgetConfig
 from deep_research.models import (
     EvidenceObservation,
@@ -15,10 +15,39 @@ from deep_research.models import (
     SearchResult,
     TaskStatus,
 )
+from deep_research.providers import ProviderError
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 
 class AppTests(unittest.TestCase):
+    def test_plan_failure_writes_safe_provider_error(self) -> None:
+        failure = ProviderError(
+            "provider HTTP error: 432: internal detail",
+            retryable=False,
+            status=432,
+            code="tavily_quota_exhausted",
+            public_message="The Tavily usage limit is exhausted.",
+        )
+        def fail(_prompt: str) -> dict[str, object]:
+            raise failure
+
+        model = FakeModel({"research_plan": fail})
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "plan.json"
+            with self.assertRaises(ProviderError):
+                create_plan(
+                    query="A bounded research question",
+                    output_path=output,
+                    config=BudgetConfig(),
+                    model=model,
+                )
+            payload = json.loads(output.read_text())
+
+        self.assertEqual("failed", payload["status"])
+        self.assertEqual("tavily_quota_exhausted", payload["error_code"])
+        self.assertEqual("The Tavily usage limit is exhausted.", payload["error"])
+        self.assertNotIn("internal detail", payload["error"])
+
     def test_partial_evidence_survives_nonfatal_task_errors(self) -> None:
         tasks = [
             ResearchTask(
