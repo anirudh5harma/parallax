@@ -158,6 +158,157 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_claim_frame_generation_retries_duplicate_frames(self) -> None:
+        calls = 0
+
+        def queries(_prompt: str) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            frames = (
+                [
+                    {
+                        "frame_id": "H1",
+                        "proposition": "The same proposition is repeated across every frame.",
+                    }
+                    for _ in range(4)
+                ]
+                if calls == 1
+                else [
+                    {
+                        "frame_id": f"H{index}",
+                        "proposition": f"Distinct proposition {index} has test evidence.",
+                    }
+                    for index in range(1, 5)
+                ]
+            )
+            return {
+                "queries": [{"query_text": "focused query", "rationale": "coverage"}],
+                "claim_frames": frames,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=FakeModel({"search_queries": queries}),
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig()),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            )
+            result = researcher._generate_queries(
+                ResearchTask(
+                    id="T1",
+                    question="What does the evidence show?",
+                    rationale="Test claim frames",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                ),
+                threading.Event(),
+                target=1,
+            )
+
+        self.assertEqual(2, calls)
+        self.assertEqual(1, len(result))
+        self.assertEqual(4, len(researcher._claim_frames["T1"]))
+
+    def test_claim_frame_generation_rejects_repeated_invalid_frames(self) -> None:
+        invalid = {
+            "queries": [{"query_text": "focused query", "rationale": "coverage"}],
+            "claim_frames": [
+                {
+                    "frame_id": "H1",
+                    "proposition": "The same proposition is repeated across every frame.",
+                }
+                for _ in range(4)
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=FakeModel({"search_queries": invalid}),
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig()),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            )
+            with self.assertRaisesRegex(ValueError, "invalid canonical claim frames"):
+                researcher._generate_queries(
+                    ResearchTask(
+                        id="T1",
+                        question="What does the evidence show?",
+                        rationale="Test claim frames",
+                        priority=Priority.HIGH,
+                        page_budget_share=1,
+                    ),
+                    threading.Event(),
+                    target=1,
+                )
+
+    def test_claim_frames_canonicalize_only_explicitly_matched_evidence(self) -> None:
+        proposition = "AI adoption reduces entry-level software hiring through 2035."
+        model = FakeModel({
+            "page_evidence": lambda prompt: {
+                "observations": [{
+                    "statement": proposition if "matched.example" in prompt else "Source-specific paraphrase.",
+                    "claim_frame_id": "H1" if "novel.example" not in prompt else "NOVEL",
+                    "polarity": "support",
+                    "excerpt": "Study reports a measurable effect.",
+                    "source_type": "paper",
+                }]
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model, search=FakeSearch([]), fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig()),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(), fetch_gate=FetchGate(2),
+            )
+            researcher._claim_frames["T1"] = {
+                "H1": proposition
+            }
+            research_task = ResearchTask(
+                id="T1", question="How will AI affect software hiring?",
+                rationale="Forecast employment effects", priority=Priority.HIGH,
+                page_budget_share=1,
+            )
+            matched = FetchedPage(
+                url="https://matched.example/a",
+                normalized_url="https://matched.example/a",
+                domain="matched.example", title="Matched",
+                text="Study reports a measurable effect.", content_hash="a",
+            )
+            novel = FetchedPage(
+                url="https://novel.example/a",
+                normalized_url="https://novel.example/a",
+                domain="novel.example", title="Novel",
+                text="Study reports a measurable effect.", content_hash="b",
+            )
+            mismatch = FetchedPage(
+                url="https://mismatch.example/a",
+                normalized_url="https://mismatch.example/a",
+                domain="mismatch.example", title="Mismatch",
+                text="Study reports a measurable effect.", content_hash="c",
+            )
+            matched_observation = researcher._extract_observations(
+                research_task, matched, threading.Event()
+            )[0]
+            novel_observation = researcher._extract_observations(
+                research_task, novel, threading.Event()
+            )[0]
+            mismatch_observation = researcher._extract_observations(
+                research_task, mismatch, threading.Event()
+            )[0]
+
+        self.assertEqual(
+            "AI adoption reduces entry-level software hiring through 2035.",
+            matched_observation.statement,
+        )
+        self.assertEqual("Source-specific paraphrase.", novel_observation.statement)
+        self.assertEqual("Source-specific paraphrase.", mismatch_observation.statement)
+
     def test_partial_page_failures_do_not_fail_a_productive_task(self) -> None:
         class PartialExtractor:
             def extract(

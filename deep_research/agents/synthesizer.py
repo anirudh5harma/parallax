@@ -30,10 +30,10 @@ def build_synthesis_context(
     observations: list[EvidenceObservation],
     *,
     critic_contested_claim_ids: list[str] | None = None,
-    max_claims: int = 60,
+    max_claims: int = 24,
     max_contested_claims: int = 6,
     max_contested_title_words: int = 300,
-    max_sources_per_polarity: int = 5,
+    max_sources_per_polarity: int = 3,
 ) -> SynthesisContext:
     urls = sorted({observation.source_url for observation in observations})
     url_to_id = {url: f"S{index}" for index, url in enumerate(urls, start=1)}
@@ -77,7 +77,39 @@ def build_synthesis_context(
     uncontested = [
         claim for claim in ranked_claims if claim.claim_id not in effective_contested
     ]
-    ranked = (contested + uncontested)[:max_claims]
+    selected_ids = {claim.claim_id for claim in contested}
+    balanced: list[EvidenceClaim] = []
+    task_ids = sorted(
+        {task_id for claim in uncontested for task_id in claim.task_ids},
+        key=lambda task_id: (not task_id.startswith("T"), task_id),
+    )
+    task_buckets = {
+        task_id: [claim for claim in uncontested if task_id in claim.task_ids]
+        for task_id in task_ids
+    }
+    while len(contested) + len(balanced) < max_claims:
+        added = False
+        for task_id in task_ids:
+            bucket = task_buckets[task_id]
+            while bucket and bucket[0].claim_id in selected_ids:
+                bucket.pop(0)
+            if not bucket:
+                continue
+            claim = bucket.pop(0)
+            selected_ids.add(claim.claim_id)
+            balanced.append(claim)
+            added = True
+            if len(contested) + len(balanced) >= max_claims:
+                break
+        if not added:
+            break
+    for claim in uncontested:
+        if len(contested) + len(balanced) >= max_claims:
+            break
+        if claim.claim_id not in selected_ids:
+            selected_ids.add(claim.claim_id)
+            balanced.append(claim)
+    ranked = contested + balanced
     packet: list[dict[str, object]] = []
     allowed_sources_by_claim: dict[str, set[str]] = {}
     for claim in ranked:
@@ -102,13 +134,31 @@ def build_synthesis_context(
         }
 
         def compact(items: list[EvidenceObservation]) -> list[dict[str, str]]:
+            selected: list[EvidenceObservation] = []
+            selected_ids: set[str] = set()
+            seen_domains: set[str] = set()
+            for item in items:
+                if item.source_domain in seen_domains:
+                    continue
+                selected.append(item)
+                selected_ids.add(item.observation_id)
+                seen_domains.add(item.source_domain)
+                if len(selected) >= max_sources_per_polarity:
+                    break
+            if len(selected) < max_sources_per_polarity:
+                for item in items:
+                    if item.observation_id in selected_ids:
+                        continue
+                    selected.append(item)
+                    if len(selected) >= max_sources_per_polarity:
+                        break
             return [
                 {
                     "source_id": url_to_id[item.source_url],
                     "excerpt": item.excerpt,
                     "source_type": item.source_type or "other",
                 }
-                for item in items[:max_sources_per_polarity]
+                for item in selected
             ]
 
         packet.append(
@@ -255,7 +305,11 @@ def contextualize_remaining_gaps(
     context: SynthesisContext,
     remaining_gaps: list[str],
 ) -> list[str]:
-    gaps = [_truncate_words(gap, 40) for gap in remaining_gaps]
+    gaps = [
+        _truncate_words(cleaned, 40)
+        for gap in remaining_gaps
+        if (cleaned := _strip_internal_claim_ids(gap))
+    ]
     if context.omitted_contested_count:
         notice = (
             f"{context.omitted_contested_count} additional contested findings "
@@ -268,6 +322,21 @@ def contextualize_remaining_gaps(
 def _truncate_words(value: str, limit: int) -> str:
     words = value.split()
     return " ".join(words[:limit]) + ("…" if len(words) > limit else "")
+
+
+def _strip_internal_claim_ids(value: str) -> str:
+    claim_id = r"C[0-9a-fA-F]{10}"
+    cleaned = re.sub(
+        rf"[\[(]\s*{claim_id}(?:\s*,\s*{claim_id})*\s*[\])]",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(rf"`?\b{claim_id}\b`?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"``", "", cleaned)
+    cleaned = re.sub(r"\(\s*\)|\[\s*\]", "", cleaned)
+    cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
+    return " ".join(cleaned.split())
 
 
 def _display_claim_text(value: str) -> str:

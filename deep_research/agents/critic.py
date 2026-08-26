@@ -13,7 +13,7 @@ from ..domain.models import (
     ResearchTask,
 )
 from ..infrastructure.audit import JsonlAuditLogger
-from ..infrastructure.providers import StructuredModel
+from ..infrastructure.providers import ProviderError, StructuredModel
 from .synthesizer import (
     build_fallback_report_payload,
     build_synthesis_context,
@@ -75,7 +75,12 @@ def _critique_schema(max_followups: int) -> dict[str, Any]:
                 },
             },
         },
-        "required": ["coverage", "contested_claim_ids", "remaining_gaps", "followups"],
+        "required": [
+            "coverage",
+            "contested_claim_ids",
+            "remaining_gaps",
+            "followups",
+        ],
         "additionalProperties": False,
     }
 
@@ -179,7 +184,9 @@ class CriticSynthesizer:
                 "Do not resolve contradictions silently. contested_claim_ids may include a "
                 "contradiction-only proposition when its evidence directly challenges another "
                 "supported finding despite different wording. Select only genuine, query-relevant "
-                "disagreement; do not merge claims or infer additional support."
+                "disagreement; do not infer additional support. remaining_gaps must be plain "
+                "user-facing prose and must never contain claim IDs, "
+                "task IDs, source IDs, or other internal identifiers."
             ),
             user_prompt=json.dumps(
                 {
@@ -301,6 +308,37 @@ class CriticSynthesizer:
             critic_contested_claim_ids=contested_claim_ids,
         )
         synthesis_gaps = contextualize_remaining_gaps(context, remaining_gaps)
+
+        def render_fallback(reason: Exception) -> str:
+            fallback = build_fallback_report_payload(context, synthesis_gaps)
+            fallback_report = render_report(
+                fallback,
+                context,
+                remaining_gaps=fallback["remaining_gaps"],
+            )
+            self.audit.log(
+                "synthesis.fallback_rendered",
+                reason=" ".join(str(reason).split())[:300],
+                finding_count=sum(
+                    len(fallback[section])
+                    for section in (
+                        "main_findings",
+                        "contested_findings",
+                        "weak_evidence",
+                    )
+                ),
+            )
+            return fallback_report
+
+        def complete(report: str) -> str:
+            self.audit.log(
+                "synthesis.completed",
+                report_word_count=len(report.split()),
+                source_count=len(context.source_urls),
+                budget=self.budget.snapshot(),
+            )
+            return report
+
         if not claims:
             payload: dict[str, object] = {
                 "executive_summary": (
@@ -340,13 +378,16 @@ class CriticSynthesizer:
             sorted(context.claims_by_id),
             sorted(context.source_urls, key=lambda item: int(item[1:])),
         )
-        payload = self.model.generate_json(
-            system_prompt=system_prompt,
-            user_prompt=json.dumps(report_input, ensure_ascii=False),
-            schema_name="final_report",
-            schema=schema,
-            timeout_seconds=self.budget.remaining_seconds(),
-        )
+        try:
+            payload = self.model.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=json.dumps(report_input, ensure_ascii=False),
+                schema_name="final_report",
+                schema=schema,
+                timeout_seconds=self.budget.remaining_seconds(),
+            )
+        except (ProviderError, BudgetExceeded) as exc:
+            return complete(render_fallback(exc))
         payload, citation_repairs = repair_report_citations(payload, context)
         if citation_repairs:
             self.audit.log("synthesis.citations_repaired", repairs=citation_repairs)
@@ -366,13 +407,16 @@ class CriticSynthesizer:
                     "Do not add claims or sources."
                 ),
             }
-            payload = self.model.generate_json(
-                system_prompt=system_prompt,
-                user_prompt=json.dumps(repair_input, ensure_ascii=False),
-                schema_name="final_report",
-                schema=schema,
-                timeout_seconds=self.budget.remaining_seconds(),
-            )
+            try:
+                payload = self.model.generate_json(
+                    system_prompt=system_prompt,
+                    user_prompt=json.dumps(repair_input, ensure_ascii=False),
+                    schema_name="final_report",
+                    schema=schema,
+                    timeout_seconds=self.budget.remaining_seconds(),
+                )
+            except (ProviderError, BudgetExceeded) as retry_error:
+                return complete(render_fallback(retry_error))
             payload, citation_repairs = repair_report_citations(payload, context)
             if citation_repairs:
                 self.audit.log("synthesis.citations_repaired", repairs=citation_repairs)
@@ -397,10 +441,4 @@ class CriticSynthesizer:
                         )
                     ),
                 )
-        self.audit.log(
-            "synthesis.completed",
-            report_word_count=len(report.split()),
-            source_count=len(context.source_urls),
-            budget=self.budget.snapshot(),
-        )
-        return report
+        return complete(report)

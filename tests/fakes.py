@@ -30,7 +30,18 @@ class FakeModel:
             self.calls.append(schema_name)
         handler = self.handlers[schema_name]
         value = handler(user_prompt) if callable(handler) else handler
-        return value.copy() if isinstance(value, dict) else value
+        if not isinstance(value, dict):
+            return value
+        result = value.copy()
+        if schema_name == "search_queries" and "claim_frames" not in result:
+            result["claim_frames"] = [
+                {
+                    "frame_id": f"H{index}",
+                    "proposition": f"Test proposition {index} has distinct evidence.",
+                }
+                for index in range(1, 5)
+            ]
+        return result
 
 
 class FakeSearch:

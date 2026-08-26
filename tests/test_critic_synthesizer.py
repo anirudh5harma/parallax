@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from deep_research.infrastructure.audit import JsonlAuditLogger
+from deep_research.infrastructure.providers import ProviderError
 from deep_research.domain.budget import BudgetConfig, BudgetManager
 from deep_research.agents.critic import CriticSynthesizer, _report_schema
 from deep_research.domain.ledger import EvidenceLedger
@@ -34,6 +35,203 @@ def task(task_id: str = "T1") -> ResearchTask:
 
 
 class CriticSynthesizerTests(unittest.TestCase):
+    def test_synthesis_packet_balances_planner_task_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            observations: list[EvidenceObservation] = []
+            for claim_index in range(25):
+                statement = f"Highly supported task-one claim {claim_index}."
+                for domain_index in range(3):
+                    observations.append(
+                        EvidenceObservation(
+                            observation_id=f"OT1-{claim_index}-{domain_index}",
+                            task_id="T1",
+                            source_url=(
+                                f"https://t1-{claim_index}-{domain_index}.example/a"
+                            ),
+                            source_domain=f"t1-{claim_index}-{domain_index}.example",
+                            statement=statement,
+                            polarity=Polarity.SUPPORT,
+                            excerpt="Measured result.",
+                        )
+                    )
+            for task_id in ("T2", "T3", "T4"):
+                observations.append(
+                    EvidenceObservation(
+                        observation_id=f"O{task_id}",
+                        task_id=task_id,
+                        source_url=f"https://{task_id.casefold()}.example/a",
+                        source_domain=f"{task_id.casefold()}.example",
+                        statement=f"Lower-confidence finding for {task_id}.",
+                        polarity=Polarity.SUPPORT,
+                        excerpt="Preliminary result.",
+                    )
+                )
+            ledger.add_observations(observations)
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+
+        covered_tasks = {
+            task_id
+            for claim in context.claims_by_id.values()
+            for task_id in claim.task_ids
+        }
+        self.assertEqual(24, len(context.packet))
+        self.assertTrue({"T1", "T2", "T3", "T4"}.issubset(covered_tasks))
+
+    def test_synthesis_packet_prefers_distinct_source_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            statement = "A result is supported across distinct domains."
+            observations = [
+                EvidenceObservation(
+                    observation_id=f"O{index}",
+                    task_id="T1",
+                    source_url=url,
+                    source_domain=domain,
+                    statement=statement,
+                    polarity=Polarity.SUPPORT,
+                    excerpt="Measured result.",
+                )
+                for index, (url, domain) in enumerate(
+                    [
+                        ("https://same.example/a", "same.example"),
+                        ("https://same.example/b", "same.example"),
+                        ("https://same.example/c", "same.example"),
+                        ("https://other.example/a", "other.example"),
+                        ("https://third.example/a", "third.example"),
+                    ]
+                )
+            ]
+            ledger.add_observations(observations)
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+
+        selected_urls = {
+            context.source_urls[str(item["source_id"])]
+            for item in context.packet[0]["support"]
+        }
+        self.assertEqual(
+            {
+                "https://same.example/a",
+                "https://other.example/a",
+                "https://third.example/a",
+            },
+            selected_urls,
+        )
+
+    def test_synthesis_provider_timeout_returns_cited_fallback(self) -> None:
+        def timeout(_prompt: str) -> dict[str, object]:
+            raise ProviderError(
+                "request failed: TimeoutError",
+                code="bedrock_unavailable",
+                public_message="Bedrock is temporarily unavailable.",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = Path(tmp) / "events.jsonl"
+            audit = JsonlAuditLogger(audit_path)
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1",
+                        task_id="T1",
+                        source_url="https://support.example/a",
+                        source_domain="support.example",
+                        statement="AI adoption changes software hiring.",
+                        polarity=Polarity.SUPPORT,
+                        excerpt="AI adoption changed software hiring.",
+                    )
+                ]
+            )
+            report = CriticSynthesizer(
+                FakeModel({"final_report": timeout}),
+                BudgetManager(BudgetConfig()),
+                audit,
+            ).synthesize(
+                original_query="How will AI change tech?",
+                tasks=[task()],
+                claims=ledger.claims(),
+                observations=ledger.observations(),
+                remaining_gaps=["Long-term evidence remains limited."],
+            )
+            events = [json.loads(line) for line in audit_path.read_text().splitlines()]
+
+        self.assertIn("AI adoption changes software hiring.", report)
+        self.assertIn("https://support.example/a", report)
+        self.assertEqual(
+            1,
+            sum(event["event"] == "synthesis.fallback_rendered" for event in events),
+        )
+        self.assertEqual(
+            1,
+            sum(event["event"] == "synthesis.completed" for event in events),
+        )
+
+    def test_synthesis_retry_timeout_returns_cited_fallback(self) -> None:
+        calls = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = Path(tmp) / "events.jsonl"
+            audit = JsonlAuditLogger(audit_path)
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1",
+                        task_id="T1",
+                        source_url="https://support.example/a",
+                        source_domain="support.example",
+                        statement="AI adoption changes software hiring.",
+                        polarity=Polarity.SUPPORT,
+                        excerpt="AI adoption changed software hiring.",
+                    )
+                ]
+            )
+            claim = ledger.claims()[0]
+
+            def invalid_then_timeout(_prompt: str) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise ProviderError(
+                        "request failed: TimeoutError",
+                        code="bedrock_unavailable",
+                        public_message="Bedrock is temporarily unavailable.",
+                    )
+                return {
+                    "executive_summary": "Summary.",
+                    "main_findings": [],
+                    "contested_findings": [
+                        {
+                            "claim_id": claim.claim_id,
+                            "synthesis": "Incorrectly contested.",
+                            "source_ids": ["S1"],
+                        }
+                    ],
+                    "weak_evidence": [],
+                    "remaining_gaps": [],
+                }
+
+            report = CriticSynthesizer(
+                FakeModel({"final_report": invalid_then_timeout}),
+                BudgetManager(BudgetConfig()),
+                audit,
+            ).synthesize(
+                original_query="How will AI change tech?",
+                tasks=[task()],
+                claims=ledger.claims(),
+                observations=ledger.observations(),
+                remaining_gaps=[],
+            )
+            events = [json.loads(line) for line in audit_path.read_text().splitlines()]
+
+        self.assertEqual(2, calls)
+        self.assertIn("AI adoption changes software hiring.", report)
+        self.assertIn("https://support.example/a", report)
+        self.assertEqual(
+            1,
+            sum(event["event"] == "synthesis.fallback_rendered" for event in events),
+        )
+
     def test_synthesis_packet_caps_contested_claims_for_bounded_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
@@ -255,6 +453,29 @@ class CriticSynthesizerTests(unittest.TestCase):
 
         self.assertIn("Canonical critic gap", report)
         self.assertNotIn("Model paraphrase", report)
+
+    def test_remaining_gaps_strip_internal_claim_ids(self) -> None:
+        context = build_synthesis_context([], [])
+        gaps = contextualize_remaining_gaps(
+            context,
+            [
+                "Evidence is flagged as a gap (Cb7343f4bbe) but remains unresolved.",
+                "AI convergence (C3f7470b328) is not substantively developed.",
+                "Sustainability (C5e3b56aba4, Cedf62d166f) is partially addressed.",
+                "Claim `cb7343f4bbe` remains unresolved.",
+            ],
+        )
+
+        self.assertEqual(
+            [
+                "Evidence is flagged as a gap but remains unresolved.",
+                "AI convergence is not substantively developed.",
+                "Sustainability is partially addressed.",
+                "Claim remains unresolved.",
+            ],
+            gaps,
+        )
+        self.assertNotRegex(" ".join(gaps), r"\bC[0-9a-fA-F]{10}\b")
 
     def test_report_schema_constrains_ledger_identifiers(self) -> None:
         schema = _report_schema(["C1", "C2"], ["S1", "S2"])
