@@ -15,7 +15,11 @@ PLAN_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["researchable", "reject"],
         },
-        "reason": {"type": "string", "minLength": 2, "maxLength": 240},
+        "reason": {
+            "type": "string",
+            "minLength": 2,
+            "description": "Concise planning or rejection reason, preferably under 40 words.",
+        },
         "tasks": {
             "type": "array",
             "minItems": 0,
