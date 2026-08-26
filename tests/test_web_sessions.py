@@ -168,6 +168,34 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertNotIn(parent.id, [item["id"] for item in service.list_sessions()])
         self.assertIn(child.id, [item["id"] for item in service.list_sessions()])
 
+    def test_retention_removes_evicted_session_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), auto_start=False, max_retained_sessions=1
+            )
+            first = service.create("First research")
+            first.status = "completed"
+            artifact_dir = Path(tmp) / first.id
+            artifact_dir.mkdir()
+            (artifact_dir / "run.json").write_text("{}", encoding="utf-8")
+
+            service.create("Second research")
+
+        self.assertFalse(artifact_dir.exists())
+
+    def test_ready_sessions_are_evictable_at_retention_capacity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), auto_start=False, max_retained_sessions=1
+            )
+            first = service.create("First research")
+            first.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+
+            second = service.create("Second research")
+
+        self.assertNotIn(first.id, [item["id"] for item in service.list_sessions()])
+        self.assertIn(second.id, [item["id"] for item in service.list_sessions()])
+
     def test_start_rechecks_active_capacity_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(
@@ -321,7 +349,7 @@ class ResearchSessionServiceTests(unittest.TestCase):
 
         self.assertEqual("failed", session.status)
         self.assertEqual("session.failed", session.events[-1]["event"])
-        self.assertIn("startup failed", session.error)
+        self.assertEqual("Research could not complete.", session.error)
 
     def test_contradiction_starts_user_directed_child_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

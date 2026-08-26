@@ -4,6 +4,7 @@ import atexit
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -18,14 +19,15 @@ from typing import Any
 from ..application.runtime import worker_script_path, worker_timeout
 from ..domain.budget import BudgetConfig
 
-
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed", "rejected"}
 STREAM_END_STATUSES = TERMINAL_STATUSES | {"ready"}
+EVICTABLE_STATUSES = TERMINAL_STATUSES | {"ready"}
 DEFAULT_BEDROCK_MODEL = "us.anthropic.claude-sonnet-4-6"
 MAX_SESSION_EVENTS = 2_000
 MAX_RETAINED_SESSIONS = 50
 MAX_ACTIVE_SESSIONS = 2
 MAX_SSE_CONNECTIONS = 8
+SESSION_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 
 
 class SessionCapacityError(RuntimeError):
@@ -259,6 +261,8 @@ class ResearchSessionService:
         self._processes: dict[str, subprocess.Popen] = {}
         self._sse_connections = 0
         self._lock = threading.Lock()
+        self.output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._prune_artifacts()
         atexit.register(self.shutdown)
 
     def configured(self) -> bool:
@@ -339,13 +343,19 @@ class ResearchSessionService:
                     (
                         item
                         for item in self._sessions.values()
-                        if item.status in TERMINAL_STATUSES
+                        if item.status in EVICTABLE_STATUSES
                     ),
                     key=lambda item: item.created_at,
                 )
                 if not terminal:
                     raise SessionCapacityError("session retention capacity reached")
                 evicted = terminal[0]
+                try:
+                    self._remove_artifacts(evicted.id)
+                except (OSError, RuntimeError) as exc:
+                    raise SessionCapacityError(
+                        "session artifact retention cleanup failed"
+                    ) from exc
                 self._sessions.pop(evicted.id, None)
                 for child in self._sessions.values():
                     if child.parent_session_id == evicted.id:
@@ -496,12 +506,10 @@ class ResearchSessionService:
             environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(
                 worker_timeout(self.config.wall_clock_timeout_seconds)
             )
-            process = subprocess.Popen(
+            process = _start_worker(
                 command,
-                env=environment,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
+                environment,
+                session_root / "worker.stderr.log",
             )
             with self._lock:
                 self._processes[session.id] = process
@@ -529,17 +537,15 @@ class ResearchSessionService:
                         retryable=bool(payload.get("error_retryable", False)),
                     )
                     return
-                detail = "planner exited without a valid plan"
-                if process.stderr is not None:
-                    detail = process.stderr.read(500).strip() or detail
-                self._fail(session, detail)
+                self._fail(session, "Research planning could not complete.")
                 return
             session.mark_ready([dict(task) for task in tasks if isinstance(task, dict)])
         except Exception as exc:
             if process is not None and process.poll() is None:
                 process.kill()
                 process.wait()
-            self._fail(session, f"{type(exc).__name__}: {exc}")
+            _record_service_error(self.output_root / session.id, exc)
+            self._fail(session, "Research planning could not complete.")
         finally:
             with self._lock:
                 self._processes.pop(session.id, None)
@@ -588,12 +594,10 @@ class ResearchSessionService:
                 message="Planner is framing four evidence paths",
                 model=self.model_id,
             )
-            process = subprocess.Popen(
+            process = _start_worker(
                 command,
-                env=environment,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
+                environment,
+                session_root / "worker.stderr.log",
             )
             with self._lock:
                 self._processes[session.id] = process
@@ -616,10 +620,7 @@ class ResearchSessionService:
             del event_path, event_offset
             run_dirs = sorted(path for path in session_root.iterdir() if path.is_dir())
             if not run_dirs:
-                detail = "research worker exited without artifacts"
-                if process.stderr is not None:
-                    detail = process.stderr.read(500).strip() or detail
-                self._fail(session, detail)
+                self._fail(session, "Research worker exited without artifacts.")
                 return
             run_dir = run_dirs[-1]
             run = _read_json(run_dir / "run.json")
@@ -696,7 +697,8 @@ class ResearchSessionService:
             if process is not None and process.poll() is None:
                 process.kill()
                 process.wait()
-            self._fail(session, f"{type(exc).__name__}: {exc}")
+            _record_service_error(self.output_root / session.id, exc)
+            self._fail(session, "Research could not complete.")
         finally:
             with self._lock:
                 self._processes.pop(session.id, None)
@@ -767,6 +769,29 @@ class ResearchSessionService:
                 process.kill()
                 process.wait()
 
+    def _prune_artifacts(self) -> None:
+        directories = sorted(
+            (
+                path
+                for path in self.output_root.iterdir()
+                if path.is_dir() and SESSION_ID_PATTERN.fullmatch(path.name)
+            ),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in directories[self.max_retained_sessions :]:
+            self._remove_artifacts(path.name)
+
+    def _remove_artifacts(self, session_id: str) -> None:
+        if not SESSION_ID_PATTERN.fullmatch(session_id):
+            raise RuntimeError("refusing to remove an invalid session artifact path")
+        target = self.output_root / session_id
+        if not target.exists():
+            return
+        if target.is_symlink() or target.resolve().parent != self.output_root:
+            raise RuntimeError("refusing to remove an unsafe session artifact path")
+        shutil.rmtree(target)
+
 
 def _session_title(query: str, branch: dict[str, str] | None) -> str:
     if branch:
@@ -793,6 +818,30 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
     value = json.loads(path.read_text(encoding="utf-8"))
     return value if isinstance(value, dict) else {}
+
+
+def _start_worker(
+    command: list[str],
+    environment: dict[str, str],
+    error_path: Path,
+) -> subprocess.Popen:
+    error_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with error_path.open("ab", buffering=0) as error_stream:
+        return subprocess.Popen(
+            command,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=error_stream,
+        )
+
+
+def _record_service_error(session_root: Path, exc: Exception) -> None:
+    try:
+        session_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (session_root / "service-error.log").open("a", encoding="utf-8") as stream:
+            stream.write(f"{datetime.now(UTC).isoformat()} {type(exc).__name__}: {exc}\n")
+    except OSError:
+        pass
 
 
 def _chunks(value: str, size: int) -> list[str]:

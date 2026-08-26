@@ -6,7 +6,11 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from deep_research.api.sessions import ResearchSessionService, SessionCapacityError
-from deep_research.api.http import AnonymousWorkspaceQuota, create_app
+from deep_research.api.http import (
+    GLOBAL_LIMITS,
+    AnonymousWorkspaceQuota,
+    create_app,
+)
 
 
 WORKSPACE_A = "a" * 32
@@ -131,6 +135,14 @@ class LocalApiBoundaryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SessionCapacityError, "daily anonymous plan quota"):
             quota.reserve(WORKSPACE_A, "plan")
+
+    def test_global_anonymous_quota_cannot_be_bypassed_with_new_workspace_keys(self) -> None:
+        quota = AnonymousWorkspaceQuota()
+        for index in range(GLOBAL_LIMITS["plan"]):
+            quota.reserve(f"{index:032x}", "plan")
+
+        with self.assertRaisesRegex(SessionCapacityError, "service"):
+            quota.reserve("f" * 32, "plan")
 
     def test_oversized_request_is_rejected_before_parsing(self) -> None:
         client = TestClient(create_app(ResearchSessionService(auto_start=False)))

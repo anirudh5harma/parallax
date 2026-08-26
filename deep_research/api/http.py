@@ -5,28 +5,29 @@ import json
 import os
 import threading
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..domain.budget import BudgetConfig
 from .sessions import (
+    STREAM_END_STATUSES,
     ResearchSessionService,
     SessionCapacityError,
     SessionLaunchError,
-    STREAM_END_STATUSES,
 )
-
 
 DEFAULT_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
 DEFAULT_HOSTS = {"localhost", "127.0.0.1", "testserver"}
 MAX_REQUEST_BYTES = 16_384
 WORKSPACE_LIMITS = {"plan": 10, "run": 5, "branch": 5}
+GLOBAL_LIMITS = {"plan": 50, "run": 20, "branch": 20}
 
 
 class AnonymousWorkspaceQuota:
@@ -38,6 +39,7 @@ class AnonymousWorkspaceQuota:
     def reserve(self, workspace_id: str, action: str) -> None:
         day = datetime.now(UTC).date().isoformat()
         key = (day, workspace_id, action)
+        global_key = (day, "__global__", action)
         with self._lock:
             if self._day != day:
                 self._counts.clear()
@@ -46,14 +48,21 @@ class AnonymousWorkspaceQuota:
                 raise SessionCapacityError(
                     f"daily anonymous {action} quota reached for this workspace"
                 )
+            if self._counts[global_key] >= GLOBAL_LIMITS[action]:
+                raise SessionCapacityError(
+                    f"daily anonymous {action} capacity reached for this service"
+                )
             self._counts[key] += 1
+            self._counts[global_key] += 1
 
     def refund(self, workspace_id: str, action: str) -> None:
         day = datetime.now(UTC).date().isoformat()
         key = (day, workspace_id, action)
+        global_key = (day, "__global__", action)
         with self._lock:
             if self._counts[key] > 0:
                 self._counts[key] -= 1
+                self._counts[global_key] = max(0, self._counts[global_key] - 1)
 
 
 def _workspace_id(value: str) -> str:
@@ -91,7 +100,16 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     quota = AnonymousWorkspaceQuota()
     allowed_origins = _environment_set("WEB_ALLOWED_ORIGINS", DEFAULT_ORIGINS)
     allowed_hosts = _environment_set("WEB_ALLOWED_HOSTS", DEFAULT_HOSTS)
-    app = FastAPI(title="Parallax Research API", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        sessions.shutdown()
+
+    app = FastAPI(
+        title="Parallax Research API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
     app.state.sessions = sessions
     app.add_middleware(
         TrustedHostMiddleware,
@@ -288,6 +306,3 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
         )
 
     return app
-
-
-app = create_app()
