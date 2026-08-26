@@ -152,8 +152,87 @@ export function workspaceKey() {
   return cachedWorkspaceKey;
 }
 
-export function eventStreamUrl(sessionId: string) {
-  return `${API_BASE}/api/sessions/${sessionId}/events?workspace=${encodeURIComponent(workspaceKey())}`;
+export class ResearchEventStream {
+  private readonly controller = new AbortController();
+  private readonly listeners = new Map<string, Set<(event: MessageEvent<string>) => void>>();
+  private lastEventId = '';
+  private stopped = false;
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+
+  constructor(private readonly sessionId: string) {
+    void this.connect();
+  }
+
+  get isClosed() { return this.stopped; }
+
+  addEventListener(name: string, listener: (event: MessageEvent<string>) => void) {
+    const existing = this.listeners.get(name) ?? new Set();
+    existing.add(listener);
+    this.listeners.set(name, existing);
+  }
+
+  close() {
+    this.stopped = true;
+    this.controller.abort();
+  }
+
+  private dispatch(block: string) {
+    let eventName = 'message';
+    let eventId = '';
+    const data: string[] = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trimStart();
+      else if (line.startsWith('id:')) eventId = line.slice(3).trimStart();
+      else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+    }
+    if (!data.length) return;
+    if (eventId) this.lastEventId = eventId;
+    const event = new MessageEvent('message', {
+      data: data.join('\n'),
+      lastEventId: eventId,
+    });
+    for (const listener of this.listeners.get(eventName) ?? []) listener(event);
+  }
+
+  private async connect() {
+    while (!this.stopped) {
+      try {
+        const response = await fetch(`${API_BASE}/api/sessions/${this.sessionId}/events`, {
+          headers: {
+            Accept: 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'X-Workspace-Key': workspaceKey(),
+            ...(this.lastEventId ? { 'Last-Event-ID': this.lastEventId } : {}),
+          },
+          signal: this.controller.signal,
+        });
+        if (!response.ok || !response.body) {
+          const payload: unknown = await response.json().catch(() => ({}));
+          throw new ApiError(errorDetails(payload, response.status));
+        }
+        this.onopen?.();
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (!this.stopped) {
+          const { done, value } = await reader.read();
+          buffer += decoder.decode(value, { stream: !done }).replaceAll('\r\n', '\n');
+          let boundary = buffer.indexOf('\n\n');
+          while (boundary >= 0) {
+            this.dispatch(buffer.slice(0, boundary));
+            buffer = buffer.slice(boundary + 2);
+            boundary = buffer.indexOf('\n\n');
+          }
+          if (done) break;
+        }
+      } catch (cause) {
+        if (this.stopped || (cause instanceof DOMException && cause.name === 'AbortError')) return;
+        this.onerror?.();
+      }
+      if (!this.stopped) await new Promise((resolve) => window.setTimeout(resolve, 1_200));
+    }
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

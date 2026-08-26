@@ -103,6 +103,19 @@ class LocalApiBoundaryTests(unittest.TestCase):
         self.assertEqual([first["id"]], [item["id"] for item in listed.json()])
         self.assertEqual(404, hidden.status_code)
 
+    def test_event_stream_rejects_workspace_key_in_query_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            session = service.create("Bounded research question", workspace_id=WORKSPACE_A)
+            client = TestClient(create_app(service))
+
+            response = client.get(
+                f"/api/sessions/{session.id}/events?workspace={WORKSPACE_A}"
+            )
+
+        self.assertEqual(422, response.status_code)
+        self.assertNotIn(WORKSPACE_A, response.text)
+
     def test_start_capacity_returns_429(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(

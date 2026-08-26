@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ApiError, EvidenceClaim, Observation, SessionDetail, SessionStatus, SessionSummary, api, eventStreamUrl } from '../lib/api';
+import { ApiError, EvidenceClaim, Observation, ResearchEventStream, SessionDetail, SessionStatus, SessionSummary, api } from '../lib/api';
 import { EvidenceDrawer } from '../components/evidence-drawer';
 import { ErrorModal } from '../components/error-modal';
 import { ErrorNotice, errorNotice } from '../lib/errors';
@@ -71,7 +71,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [branching, setBranching] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const streamRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<ResearchEventStream | null>(null);
   const activeIdRef = useRef<string | null>(null);
   const seenEventsRef = useRef(new Set<string>());
   const active = composing ? null : sessions.find((item) => item.id === activeId) ?? null;
@@ -93,7 +93,7 @@ export default function Home() {
       void loadDetail(session.id).catch(backgroundFailure);
       return;
     }
-    const stream = new EventSource(eventStreamUrl(session.id)); streamRef.current = stream;
+    const stream = new ResearchEventStream(session.id); streamRef.current = stream;
     let closedIntentionally = false;
     stream.onopen = () => setError((value) => value?.code === 'connection_interrupted' ? null : value);
     const consume = (event: MessageEvent) => {
@@ -114,7 +114,7 @@ export default function Home() {
     stream.addEventListener('report.chunk', (raw) => { const data = consume(raw as MessageEvent); if (!replayingTerminal && data?.text && activeIdRef.current === session.id) setStreamedReport((value) => value + data.text); });
     stream.addEventListener('session.completed', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: data.status ?? 'completed' }); push(data, event, 'done'); closedIntentionally = true; stream.close(); void Promise.all([loadDetail(session.id), refreshSessions()]).catch(backgroundFailure); });
     stream.addEventListener('session.failed', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: 'failed' }); push(data, event, 'warning'); setError(errorNotice(new ApiError({ code: data.code ?? data.error_code ?? null, message: data.message ?? 'Research could not complete.', provider: data.provider ?? null, retryable: data.retryable ?? false, status: 0 }), 'Research could not complete')); closedIntentionally = true; stream.close(); void Promise.all([loadDetail(session.id), refreshSessions()]).catch(backgroundFailure); });
-    stream.onerror = () => { if (!replayingTerminal && !closedIntentionally && stream.readyState !== EventSource.CLOSED) setError({ title: 'Live connection interrupted', body: 'Progress updates are reconnecting automatically. Research continues in the background.', code: 'connection_interrupted', retry: () => connect(session) }); };
+    stream.onerror = () => { if (!replayingTerminal && !closedIntentionally && !stream.isClosed) setError({ title: 'Live connection interrupted', body: 'Progress updates are reconnecting automatically. Research continues in the background.', code: 'connection_interrupted', retry: () => connect(session) }); };
   }, [loadDetail, refreshSessions, updateSession]);
 
   useEffect(() => {

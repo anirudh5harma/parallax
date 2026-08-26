@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -263,12 +263,12 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     async def stream_events(
         session_id: str,
         last_event_id: str | None = Header(default=None),
-        workspace: str = Query(),
+        x_workspace_key: str = Header(alias="X-Workspace-Key"),
     ) -> StreamingResponse:
         try:
             session = sessions.get(
                 session_id,
-                workspace_id=_workspace_id(workspace),
+                workspace_id=_workspace_id(x_workspace_key),
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
