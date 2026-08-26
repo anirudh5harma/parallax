@@ -53,7 +53,7 @@ Exactly three roles are used:
 2. **Researcher** searches in parallel, deduplicates URLs, ranks sources, and compresses pages into validated evidence.
 3. **Critic/Synthesizer** checks coverage, may create at most two depth-one follow-ups, then writes the report.
 
-The serious profile enforces ceilings of 100 searches, 600 page reservations, 12 concurrent fetches, six total tasks, depth one, and 30 minutes. These are safety limits, not targets. A typical broad run screens hundreds of search results, then deeply extracts at most 30 ranked sources per task. Raw pages are never passed wholesale into synthesis.
+The serious profile enforces ceilings of 100 searches, 600 page reservations, 12 concurrent fetches, six total tasks, depth one, and 30 minutes. These are safety limits, not guarantees: unavailable, duplicate, weak, or late sources may stop a run below them. Broad runs screen hundreds of results and can spend the full page budget across the Planner's task shares. Raw pages are never passed wholesale into synthesis.
 
 Confidence is computed in code:
 

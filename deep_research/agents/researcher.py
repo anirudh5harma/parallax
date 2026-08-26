@@ -433,11 +433,10 @@ class Researcher:
                     source_domain=domain,
                 )
 
-        fetch_cap = min(page_cap, 30) if self.budget.config.max_pages >= 500 else page_cap
-        selected = _select_candidates(new_candidates, fetch_cap)
-        if len(selected) < fetch_cap:
+        selected = _select_candidates(new_candidates, page_cap)
+        if len(selected) < page_cap:
             selected.extend(
-                _select_candidates(reused_candidates, fetch_cap - len(selected))
+                _select_candidates(reused_candidates, page_cap - len(selected))
             )
         candidates = selected
 

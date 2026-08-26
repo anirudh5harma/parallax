@@ -440,8 +440,8 @@ class ResearcherTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual([12, 12, 6], [len(batch) for batch in extractor.calls])
-        self.assertEqual(30, budget.snapshot().pages)
+        self.assertEqual([12] * 12 + [6], [len(batch) for batch in extractor.calls])
+        self.assertEqual(150, budget.snapshot().pages)
         self.assertEqual(0, fetcher.max_active)
         query_angles = {
             int(url.split("source", 1)[1].split("-", 1)[0])
