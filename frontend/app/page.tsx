@@ -95,6 +95,7 @@ export default function Home() {
     }
     const stream = new ResearchEventStream(session.id); streamRef.current = stream;
     let closedIntentionally = false;
+    let polling = false;
     stream.onopen = () => setError((value) => value?.code === 'connection_interrupted' ? null : value);
     const consume = (event: MessageEvent) => {
       const key = `${session.id}:${event.lastEventId}`;
@@ -114,7 +115,20 @@ export default function Home() {
     stream.addEventListener('report.chunk', (raw) => { const data = consume(raw as MessageEvent); if (!replayingTerminal && data?.text && activeIdRef.current === session.id) setStreamedReport((value) => value + data.text); });
     stream.addEventListener('session.completed', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: data.status ?? 'completed' }); push(data, event, 'done'); closedIntentionally = true; stream.close(); void Promise.all([loadDetail(session.id), refreshSessions()]).catch(backgroundFailure); });
     stream.addEventListener('session.failed', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: 'failed' }); push(data, event, 'warning'); setError(errorNotice(new ApiError({ code: data.code ?? data.error_code ?? null, message: data.message ?? 'Research could not complete.', provider: data.provider ?? null, retryable: data.retryable ?? false, status: 0 }), 'Research could not complete')); closedIntentionally = true; stream.close(); void Promise.all([loadDetail(session.id), refreshSessions()]).catch(backgroundFailure); });
-    stream.onerror = () => { if (!replayingTerminal && !closedIntentionally && !stream.isClosed) setError({ title: 'Live connection interrupted', body: 'Progress updates are reconnecting automatically. Research continues in the background.', code: 'connection_interrupted', retry: () => connect(session) }); };
+    stream.onerror = () => {
+      if (replayingTerminal || closedIntentionally || stream.isClosed || polling) return;
+      polling = true;
+      window.setTimeout(() => {
+        void loadDetail(session.id).then((value) => {
+          updateSession(session.id, { status: value.status });
+          if (terminal.has(value.status) || value.status === 'ready') {
+            closedIntentionally = true;
+            stream.close();
+            return refreshSessions();
+          }
+        }).catch(() => undefined).finally(() => { polling = false; });
+      }, 2_500);
+    };
   }, [loadDetail, refreshSessions, updateSession]);
 
   useEffect(() => {
