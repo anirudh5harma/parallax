@@ -115,8 +115,8 @@ def _source_quality(candidate: _Candidate) -> int:
 def _select_candidates(candidates: list[_Candidate], limit: int) -> list[_Candidate]:
     """Prefer stronger results while preserving query and domain breadth."""
     ranked = sorted(
-        candidates,
-        key=lambda candidate: (-_source_quality(candidate), candidate.discovery_order),
+        ((_source_quality(candidate), candidate) for candidate in candidates),
+        key=lambda item: (-item[0], item[1].discovery_order),
     )
     selected: list[_Candidate] = []
     domain_counts: dict[str, int] = {}
@@ -147,9 +147,9 @@ def _select_candidates(candidates: list[_Candidate], limit: int) -> list[_Candid
             selected.append(candidate)
             domain_counts[candidate.domain] = domain_counts.get(candidate.domain, 0) + 1
 
-    add_tier([candidate for candidate in ranked if _source_quality(candidate) > -8])
+    add_tier([candidate for quality, candidate in ranked if quality > -8])
     if len(selected) < limit:
-        add_tier([candidate for candidate in ranked if _source_quality(candidate) <= -8])
+        add_tier([candidate for quality, candidate in ranked if quality <= -8])
     return selected
 
 
@@ -239,7 +239,6 @@ def _evidence_schema(frame_ids: list[str]) -> dict[str, Any]:
 
 def _batch_evidence_schema(page_ids: list[str], frame_ids: list[str]) -> dict[str, Any]:
     observations = _evidence_schema(frame_ids)["properties"]["observations"]
-    observations["maxItems"] = 2
     return {
         "type": "object",
         "properties": {

@@ -19,6 +19,7 @@ from typing import Any
 
 from ..application.runtime import worker_script_path, worker_timeout
 from ..domain.budget import BudgetConfig
+from ..domain.models import ResearchMode
 
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed", "rejected"}
 STREAM_END_STATUSES = TERMINAL_STATUSES | {"ready"}
@@ -30,7 +31,7 @@ MAX_ACTIVE_SESSIONS = 2
 MAX_SSE_CONNECTIONS = 8
 MAX_SSE_CONNECTIONS_PER_CLIENT = 2
 SESSION_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
-RESEARCH_MODES = {"fast", "deep"}
+RESEARCH_MODES: frozenset[ResearchMode] = frozenset({"fast", "deep"})
 MAX_BRANCH_SEED_OBSERVATIONS = 100
 
 
@@ -87,7 +88,7 @@ class ResearchSession:
     query: str
     title: str
     created_at: str
-    mode: str = "fast"
+    mode: ResearchMode = "fast"
     budget_limits: dict[str, int | float] = field(default_factory=dict)
     seed_observations: list[dict[str, Any]] = field(default_factory=list, repr=False)
     workspace_id: str = "local"
@@ -290,7 +291,7 @@ class ResearchSessionService:
         *,
         output_root: Path = Path("runs/web"),
         config: BudgetConfig | None = None,
-        configs: Mapping[str, BudgetConfig] | None = None,
+        configs: Mapping[ResearchMode, BudgetConfig] | None = None,
         model_id: str | None = None,
         auto_start: bool = True,
         max_active_sessions: int = MAX_ACTIVE_SESSIONS,
@@ -368,7 +369,7 @@ class ResearchSessionService:
         workspace_id: str = "local",
         parent_session_id: str | None = None,
         branch: dict[str, str] | None = None,
-        mode: str = "fast",
+        mode: ResearchMode = "fast",
         seed_observations: list[dict[str, Any]] | None = None,
     ) -> ResearchSession:
         try:

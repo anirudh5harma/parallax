@@ -7,7 +7,6 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +14,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from ..domain.models import ResearchMode
 from .sessions import (
     STREAM_END_STATUSES,
     ResearchSessionService,
@@ -113,7 +113,7 @@ def _environment_set(name: str, defaults: set[str]) -> set[str]:
 
 class ResearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=4_000)
-    mode: Literal["fast", "deep"] = "fast"
+    mode: ResearchMode = "fast"
 
 
 class BranchRequest(BaseModel):
