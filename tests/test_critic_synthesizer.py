@@ -543,6 +543,8 @@ class CriticSynthesizerTests(unittest.TestCase):
         self.assertEqual(0, claim.supporting_domain_count)
         self.assertEqual(1, claim.contradicting_domain_count)
         self.assertEqual(claim.claim_id, fallback["contested_findings"][0]["claim_id"])
+        self.assertIn("Available sources contradict this proposition", report)
+        self.assertNotIn("Sources disagree about this finding", report)
         self.assertIn("## Contested Findings", report)
 
     def test_critic_cannot_mark_support_only_claim_as_contested(self) -> None:

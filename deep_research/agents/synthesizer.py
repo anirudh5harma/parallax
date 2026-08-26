@@ -305,11 +305,11 @@ def build_fallback_report_payload(
         finding = {
             "claim_id": claim_id,
             "synthesis": (
-                f"Sources disagree about this finding: {statement}"
-                if claim_id in context.contested_claim_ids
+                f"Available sources contradict this proposition: {statement}"
+                if contradiction_only
                 else (
-                    f"Available sources contradict this proposition: {statement}"
-                    if contradiction_only
+                    f"Sources disagree about this finding: {statement}"
+                    if claim_id in context.contested_claim_ids
                     else (
                         f"Evidence is insufficient to establish whether {statement}"
                         if neutral_or_insufficient
