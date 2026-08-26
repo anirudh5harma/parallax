@@ -1,5 +1,6 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_RESEARCH_API_URL ?? 'http://127.0.0.1:8000';
+const REQUEST_TIMEOUT_MS = 45_000;
 
 export type SessionStatus =
   | 'planning'
@@ -160,19 +161,44 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const url = method === 'GET'
     ? `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_=${Date.now()}`
     : `${API_BASE}${path}`;
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Workspace-Key': workspaceKey(),
-      ...init?.headers,
-    },
-  });
-  if (!response.ok) {
-    const payload: unknown = await response.json().catch(() => ({}));
-    throw new ApiError(errorDetails(payload, response.status));
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  const abortFromCaller = () => controller.abort(init?.signal?.reason);
+  init?.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Workspace-Key': workspaceKey(),
+        ...init?.headers,
+      },
+    });
+    if (!response.ok) {
+      const payload: unknown = await response.json().catch(() => ({}));
+      throw new ApiError(errorDetails(payload, response.status));
+    }
+    return response.json() as Promise<T>;
+  } catch (cause) {
+    if (timedOut) {
+      throw new ApiError({
+        code: 'request_timeout',
+        message: 'The research service took too long to respond. Try again.',
+        provider: null,
+        retryable: true,
+        status: 408,
+      });
+    }
+    throw cause;
+  } finally {
+    window.clearTimeout(timeout);
+    init?.signal?.removeEventListener('abort', abortFromCaller);
   }
-  return response.json() as Promise<T>;
 }
 
 export const api = {

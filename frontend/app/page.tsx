@@ -6,10 +6,12 @@ import { useRouter } from 'next/navigation';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ApiError, EvidenceClaim, Observation, SessionDetail, SessionStatus, SessionSummary, api, eventStreamUrl } from '../lib/api';
+import { EvidenceDrawer } from '../components/evidence-drawer';
+import { ErrorModal } from '../components/error-modal';
+import { ErrorNotice, errorNotice } from '../lib/errors';
+import { DrawerSelection, cleanReport, findCitation } from '../lib/report';
 
 type Activity = { id: string; message: string; stage?: string; sourceDomain?: string; taskId?: string; tone?: 'warning' | 'done' };
-type DrawerSelection = { claim: EvidenceClaim; observation: Observation };
-type ErrorNotice = { title: string; body: string; code?: string; retry?: () => void };
 const examples = [
   'How effective are GLP-1 medicines for long-term weight management, and where does evidence disagree?',
   'Does a four-day workweek improve productivity without increasing burnout?',
@@ -26,109 +28,6 @@ function sourceIcon(domain: string) {
   let hue = 0;
   for (const character of domain) hue = (hue * 31 + character.charCodeAt(0)) % 360;
   return { initial: label[0]?.toUpperCase() ?? '·', hue };
-}
-
-function errorNotice(cause: unknown, fallback: string, retry?: () => void): ErrorNotice {
-  const apiError = cause instanceof ApiError ? cause : null;
-  const message = apiError?.message ?? (cause instanceof Error ? cause.message : fallback);
-  const signature = `${apiError?.code ?? ''} ${apiError?.provider ?? ''} ${message}`.toLowerCase();
-  const retryAction = apiError?.retryable === false ? undefined : retry;
-
-  if (/tavily/.test(signature) && /(quota|credit|exhaust|limit)/.test(signature)) {
-    return { title: 'Search credits exhausted', body: 'Search provider allowance has been reached. Update its plan or credits before starting more research.', code: apiError?.code ?? undefined };
-  }
-  if (/(bedrock|model|anthropic)/.test(signature) && /(quota|credit|exhaust|limit)/.test(signature)) {
-    return { title: 'Model usage limit reached', body: 'Model provider allowance has been reached. Update its billing or limits, then try again.', code: apiError?.code ?? undefined };
-  }
-  if (/tavily/.test(signature) && /(access.denied|unauthori|invalid.key|authentication)/.test(signature)) {
-    return { title: 'Search access unavailable', body: 'Check configured search provider credentials, then restart the research service.', code: apiError?.code ?? undefined };
-  }
-  if (/(bedrock|model|anthropic)/.test(signature) && /(access.denied|not.available|model.access|unsupported.model)/.test(signature)) {
-    return { title: 'Model access unavailable', body: 'Configured model is not available to this account. Choose an enabled model or update model access.', code: apiError?.code ?? undefined };
-  }
-  if (/daily anonymous/.test(signature)) {
-    return { title: 'Daily research limit reached', body: 'This workspace has used its research allowance for today.', code: apiError?.code ?? undefined };
-  }
-  if (/tavily/.test(signature) && /(api.key|credential|unauthori|invalid.key|authentication)/.test(signature)) {
-    return { title: 'Search credentials rejected', body: 'Check configured search provider credentials, then restart the research service.', code: apiError?.code ?? undefined };
-  }
-  if (/(bedrock|model|anthropic)/.test(signature) && /(api.key|credential|unauthori|invalid.key|authentication)/.test(signature)) {
-    return { title: 'Model credentials rejected', body: 'Check configured model provider credentials, then restart the research service.', code: apiError?.code ?? undefined };
-  }
-  if (/(api.key|credential|unauthori|invalid.key|authentication)/.test(signature)) {
-    return { title: 'Provider credentials rejected', body: 'Check configured model and search provider credentials, then restart the research service.', code: apiError?.code ?? undefined };
-  }
-  if (/(throttl|rate.limit|too.many)/.test(signature) || apiError?.status === 429) {
-    return { title: 'Provider is temporarily busy', body: 'Request limit was reached. Wait a moment, then try again.', code: apiError?.code ?? undefined, retry: retryAction };
-  }
-  if (!apiError || apiError.status >= 500) {
-    return { title: 'Research service unavailable', body: message === 'Failed to fetch' ? 'Could not reach the research service. Check that it is running and try again.' : message, code: apiError?.code ?? undefined, retry: retryAction };
-  }
-  return { title: fallback, body: message, code: apiError.code ?? undefined, retry: retryAction };
-}
-
-function ErrorModal({ close, notice }: { close: () => void; notice: ErrorNotice }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (dialog && !dialog.open) dialog.showModal();
-    return () => { if (dialog?.open) dialog.close(); };
-  }, []);
-  function retry() { close(); notice.retry?.(); }
-  return <dialog aria-describedby="error-description" aria-labelledby="error-title" className="error-modal" onCancel={close} onClick={(event) => { if (event.target === event.currentTarget) close(); }} ref={dialogRef} role="alertdialog">
-    <div className="error-card">
-      <button aria-label="Close error message" className="error-close" onClick={close} type="button">×</button>
-      <span className="error-symbol" aria-hidden="true">!</span>
-      <div className="error-copy"><p>Unable to continue</p><h2 id="error-title">{notice.title}</h2><p id="error-description">{notice.body}</p>{notice.code && <small>Reference: {notice.code}</small>}</div>
-      <div className="error-actions"><button className="secondary" onClick={close} type="button">Close</button>{notice.retry && <button autoFocus onClick={retry} type="button">Try again</button>}</div>
-    </div>
-  </dialog>;
-}
-
-function cleanReport(report: string, evidence: EvidenceClaim[]) {
-  const displayClaimText = (text: string) => text.replace(/\[\s*S\d+\s*\]/g, '').replace(/\(\s*\)|\[\s*\]/g, '').replace(/\s+/g, ' ').trim();
-  const claimsByText = new Map(evidence.map((claim) => [displayClaimText(claim.text), claim.claim_id]));
-  const output: string[] = [];
-  let claimId: string | null = null;
-  let claimSources: string[] = [];
-  let pillsPlaced = false;
-  for (const line of report.replace(/\n## Sources\s*[\s\S]*$/i, '').trim().split('\n')) {
-    if (line.startsWith('## ')) {
-      claimId = null;
-      claimSources = [];
-      pillsPlaced = false;
-    }
-    if (line.startsWith('### ')) {
-      claimId = claimsByText.get(line.slice(4).trim()) ?? null;
-      claimSources = [];
-      pillsPlaced = false;
-    }
-    if (/^- (Confidence|Support|Contradiction):/i.test(line)) continue;
-    if (/^- Sources:/i.test(line)) {
-      claimSources = [...new Set(line.match(/S\d+/g) ?? [])];
-      continue;
-    }
-    if (claimSources.length && line.trim() && !line.startsWith('#')) {
-      const citedInline = new Set(line.match(/S\d+/g) ?? []);
-      const linkedLine = claimId
-        ? line.replace(/\b(S\d+)\b/g, (sourceId) => claimSources.includes(sourceId) ? `[${sourceId}](#evidence-${claimId}-${sourceId})` : sourceId)
-        : line;
-      const pills = (pillsPlaced ? [] : claimSources.filter((sourceId) => !citedInline.has(sourceId))).map((sourceId) => claimId
-        ? `[${sourceId}](#evidence-${claimId}-${sourceId})`
-        : sourceId).join(' ');
-      pillsPlaced = true;
-      output.push(pills ? `${linkedLine} ${pills}` : linkedLine);
-      continue;
-    }
-    output.push(line);
-  }
-  return output.join('\n').trim();
-}
-
-function findCitation(evidence: EvidenceClaim[], claimId: string, sourceId: string): DrawerSelection | null {
-  const claim = evidence.find((item) => item.claim_id === claimId);
-  const observation = claim?.observations.find((item) => item.source_id === sourceId);
-  return claim && observation ? { claim, observation } : null;
 }
 
 function sessionTree(sessions: SessionSummary[]) {
@@ -190,7 +89,10 @@ export default function Home() {
         setError(errorNotice(cause, 'Research details could not refresh', () => connect(session)));
       }
     };
-    if (replayingTerminal) void loadDetail(session.id).catch(backgroundFailure);
+    if (replayingTerminal || session.status === 'ready') {
+      void loadDetail(session.id).catch(backgroundFailure);
+      return;
+    }
     const stream = new EventSource(eventStreamUrl(session.id)); streamRef.current = stream;
     let closedIntentionally = false;
     stream.onopen = () => setError((value) => value?.code === 'connection_interrupted' ? null : value);
@@ -322,15 +224,4 @@ function ResearchingState({ activity, plan }: { activity: Activity[]; plan: Sess
 
 function Report({ report, evidence, openCitation, streaming }: { report: string; evidence: EvidenceClaim[]; openCitation: (claimId: string, sourceId: string) => void; streaming: boolean }) {
   return <div className="assistant-message report-message"><span className="assistant-mark">P</span><article className="report"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: () => null, a: ({ href, children }) => { if (href?.startsWith('#evidence-')) { const match = href.match(/^#evidence-(.+)-(S\d+)$/); const claimId = match?.[1] ?? ''; const sourceId = match?.[2] ?? ''; const exists = evidence.some((claim) => claim.claim_id === claimId && claim.observations.some((item) => item.source_id === sourceId)); return exists ? <button className="citation" onClick={() => openCitation(claimId, sourceId)} onFocus={() => openCitation(claimId, sourceId)} onMouseEnter={() => openCitation(claimId, sourceId)} type="button">{children}</button> : <span>{children}</span>; } return <span>{children}</span>; } }}>{report}</ReactMarkdown>{streaming && <span className="stream-caret" aria-label="Answer is streaming" />}</article></div>;
-}
-
-function EvidenceDrawer({ branching, close, selection, startBranch }: { branching: string | null; close: () => void; selection: DrawerSelection; startBranch: (observation: Observation) => void }) {
-  const { claim, observation } = selection;
-  const support = claim.observations.filter((item) => item.polarity === 'support'); const contradictions = claim.observations.filter((item) => item.polarity === 'contradict');
-  return <><div className="drawer-backdrop" aria-hidden="true" /><aside className="evidence-drawer" aria-label={`Evidence for ${observation.source_id}`}><header><div><span>{observation.source_id}</span><p>{observation.source_domain}</p></div><button onClick={close} type="button" aria-label="Close">×</button></header><div className="drawer-scroll"><section className="drawer-summary"><h2>{claim.text}</h2><div><strong className={`confidence-${claim.confidence.toLowerCase()}`}>{claim.confidence}</strong><span>{claim.supporting_domain_count} support · {claim.contradicting_domain_count} contradict</span></div></section><a className="selected-source" href={observation.source_url} rel="noreferrer" target="_blank"><p>“{observation.excerpt}”</p><small>Open source ↗</small></a><SourceGroup label="Supporting" observations={support} /><SourceGroup branching={branching} label="Contradicting" observations={contradictions} startBranch={startBranch} />{contradictions.length === 0 && <p className="no-contradiction">No contradicting evidence attached.</p>}</div></aside></>;
-}
-
-function SourceGroup({ branching, label, observations, startBranch }: { branching?: string | null; label: string; observations: Observation[]; startBranch?: (observation: Observation) => void }) {
-  if (!observations.length) return null;
-  return <section className="source-group"><h3>{label}<span>{observations.length}</span></h3>{observations.map((item) => <article key={item.observation_id}><div><span>{item.source_id}</span><a href={item.source_url} rel="noreferrer" target="_blank">{item.source_domain} ↗</a></div><p>{item.excerpt}</p>{item.polarity === 'contradict' && startBranch && <button disabled={branching === item.observation_id} onClick={() => startBranch(item)} type="button">{branching === item.observation_id ? 'Creating branch…' : 'Research this perspective'} <span>→</span></button>}</article>)}</section>;
 }
