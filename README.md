@@ -2,6 +2,8 @@
 
 Small CLI research system that preserves evidence strength and disagreement instead of producing only a polished answer.
 
+Live app: [parallax-five-sepia.vercel.app](https://parallax-five-sepia.vercel.app)
+
 ## Run
 
 Requires Python 3.11+ and two environment variables:

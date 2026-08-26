@@ -1,7 +1,8 @@
 __pycache__/
 *.py[cod]
 .venv/
-.env
+.env*
+.vercel/
 runs/
 dist/
 *.egg-info/
