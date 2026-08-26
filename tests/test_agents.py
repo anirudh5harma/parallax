@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,10 +7,11 @@ from unittest.mock import patch
 
 from deep_research.audit import JsonlAuditLogger
 from deep_research.budget import BudgetConfig, BudgetManager
-from deep_research.models import Priority, ResearchTask, SearchResult
+from deep_research.models import FetchedPage, Priority, ResearchTask, SearchResult
 from deep_research.planner import InvalidResearchQuery, Planner
 from deep_research.researcher import FetchGate, Researcher, _Candidate, _select_candidates
 from deep_research.urls import UrlRegistry
+from deep_research.urls import normalize_url
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 
@@ -152,6 +154,83 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_serious_run_batch_extracts_only_ranked_shortlist(self) -> None:
+        class Extractor:
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def extract(
+                self,
+                urls: list[str],
+                *,
+                query: str,
+                timeout_seconds: float,
+            ) -> list[FetchedPage]:
+                del query, timeout_seconds
+                self.calls.append(urls)
+                return [
+                    FetchedPage(
+                        url=url,
+                        normalized_url=normalize_url(url),
+                        domain=normalize_url(url).split("/")[2],
+                        title="",
+                        text=f"Focused evidence from {url}",
+                        content_hash=hashlib.sha256(url.encode()).hexdigest(),
+                    )
+                    for url in urls
+                ]
+
+        extractor = Extractor()
+        fetcher = FakeFetcher()
+        results = {
+            f"distinct query {query_index}": [
+                SearchResult(
+                    f"https://source{query_index}-{index}.example/report/{index}",
+                    f"Research report {query_index}-{index}",
+                    "Detailed evidence " * 20,
+                )
+                for index in range(15)
+            ]
+            for query_index in range(15)
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = BudgetManager(BudgetConfig.serious())
+            Researcher(
+                model=FakeModel(
+                    {
+                        "search_queries": {
+                            "queries": [
+                                {
+                                    "query_text": f"distinct query {index}",
+                                    "rationale": "broad coverage",
+                                }
+                                for index in range(15)
+                            ]
+                        },
+                        "page_evidence": {"observations": []},
+                    }
+                ),
+                search=FakeSearch(results),
+                fetcher=fetcher,
+                batch_extractor=extractor,
+                budget=budget,
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(12),
+            ).research(
+                ResearchTask(
+                    id="T1",
+                    question="What does broad evidence show?",
+                    rationale="Screen broadly, then read strong sources",
+                    priority=Priority.HIGH,
+                    page_budget_share=0.25,
+                )
+            )
+
+        self.assertEqual([20, 10], [len(batch) for batch in extractor.calls])
+        self.assertEqual(30, budget.snapshot().pages)
+        self.assertEqual(0, fetcher.max_active)
+
     def test_candidate_selection_prefers_primary_and_diverse_domains(self) -> None:
         candidates = [
             _Candidate(

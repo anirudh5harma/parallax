@@ -9,6 +9,7 @@ from deep_research.providers import (
     BedrockConverseModel,
     HttpPageFetcher,
     ProviderError,
+    TavilyExtractClient,
     TavilySearchClient,
     _NoRedirectHandler,
 )
@@ -241,6 +242,31 @@ class BedrockConverseModelTests(unittest.TestCase):
     def test_tavily_rejects_untrusted_endpoint(self) -> None:
         with self.assertRaisesRegex(ValueError, "trusted API origin"):
             TavilySearchClient("secret", endpoint="https://attacker.test/search")
+
+
+class TavilyExtractClientTests(unittest.TestCase):
+    def test_extracts_query_focused_pages_in_one_bounded_request(self) -> None:
+        response = {
+            "results": [
+                {
+                    "url": "https://agency.gov/report",
+                    "raw_content": "<chunk 1> Official evidence.",
+                }
+            ],
+            "failed_results": [],
+        }
+        with patch("deep_research.providers._post_json", return_value=response) as post:
+            pages = TavilyExtractClient("secret").extract(
+                ["https://agency.gov/report"],
+                query="What changed?",
+                timeout_seconds=1800,
+            )
+
+        self.assertEqual("agency.gov", pages[0].domain)
+        payload = post.call_args.args[1]
+        self.assertEqual("What changed?", payload["query"])
+        self.assertEqual(5, payload["chunks_per_source"])
+        self.assertLessEqual(post.call_args.args[3], 30)
 
 
 class HttpPageFetcherSecurityTests(unittest.TestCase):

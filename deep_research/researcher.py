@@ -13,6 +13,7 @@ from .audit import JsonlAuditLogger
 from .budget import BudgetExceeded, BudgetManager
 from .models import (
     EvidenceObservation,
+    FetchedPage,
     FetchStatus,
     PageExploration,
     Polarity,
@@ -22,7 +23,13 @@ from .models import (
     SearchQuery,
     TaskStatus,
 )
-from .providers import PageFetcher, ProviderError, SearchClient, StructuredModel
+from .providers import (
+    BatchPageExtractor,
+    PageFetcher,
+    ProviderError,
+    SearchClient,
+    StructuredModel,
+)
 from .time_context import current_utc_date, has_current_anchor, requires_current_evidence
 from .urls import UrlRegistry, normalize_url
 
@@ -209,6 +216,7 @@ class Researcher:
         audit: JsonlAuditLogger,
         urls: UrlRegistry,
         fetch_gate: FetchGate,
+        batch_extractor: BatchPageExtractor | None = None,
         results_per_search: int = 15,
     ) -> None:
         self.model = model
@@ -218,6 +226,7 @@ class Researcher:
         self.audit = audit
         self.urls = urls
         self.fetch_gate = fetch_gate
+        self.batch_extractor = batch_extractor
         self.results_per_search = results_per_search
         self._model_slots = threading.BoundedSemaphore(
             min(4, budget.config.max_concurrent_fetches)
@@ -326,13 +335,35 @@ class Researcher:
             selected.extend(
                 _select_candidates(reused_candidates, fetch_cap - len(selected))
             )
-        candidates = [candidate.result.url for candidate in selected]
+        candidates = selected
+
+        prefetched: list[FetchedPage] = []
+        if self.batch_extractor is not None:
+            prefetched, failed = self._batch_extract(task, candidates, cancellation)
+            for exploration, error in failed:
+                explorations.append(exploration)
+                errors.append(error)
 
         executor = ThreadPoolExecutor(max_workers=self.budget.config.max_concurrent_fetches)
         futures: list[Future[tuple[PageExploration, list[EvidenceObservation], str | None]]] = [
-            executor.submit(self._process_page, task, url, cancellation)
-            for url in candidates
+            executor.submit(
+                self._process_fetched_page,
+                task,
+                page,
+                cancellation,
+            )
+            for page in prefetched
         ]
+        if self.batch_extractor is None:
+            futures.extend(
+                executor.submit(
+                    self._process_page,
+                    task,
+                    candidate.result.url,
+                    cancellation,
+                )
+                for candidate in candidates
+            )
         try:
             for future in as_completed(futures, timeout=max(0.001, self.budget.remaining_seconds())):
                 exploration, page_observations, error = future.result()
@@ -455,6 +486,81 @@ class Researcher:
             self.audit.log("researcher.query_generated", query=query)
         return queries
 
+    def _batch_extract(
+        self,
+        task: ResearchTask,
+        candidates: list[_Candidate],
+        cancellation: threading.Event,
+    ) -> tuple[
+        list[FetchedPage],
+        list[tuple[PageExploration, str]],
+    ]:
+        assert self.batch_extractor is not None
+        pages: list[FetchedPage] = []
+        failures: list[tuple[PageExploration, str]] = []
+        for offset in range(0, len(candidates), 20):
+            self._raise_if_cancelled(cancellation)
+            batch: list[_Candidate] = []
+            for candidate in candidates[offset : offset + 20]:
+                try:
+                    self.budget.reserve_page()
+                except BudgetExceeded as exc:
+                    failures.append((self._failed_exploration(task, candidate), str(exc)))
+                    return pages, failures
+                batch.append(candidate)
+            if not batch:
+                break
+            requested = {candidate.normalized_url: candidate for candidate in batch}
+            try:
+                extracted = self.batch_extractor.extract(
+                    [candidate.result.url for candidate in batch],
+                    query=task.question,
+                    timeout_seconds=self.budget.remaining_seconds(),
+                )
+            except (ProviderError, ValueError, BudgetExceeded) as exc:
+                for candidate in batch:
+                    exploration = self._failed_exploration(task, candidate)
+                    self.audit.log("page.fetch_failed", exploration=exploration, error=str(exc))
+                    failures.append((exploration, str(exc)))
+                continue
+            returned: set[str] = set()
+            for page in extracted:
+                candidate = requested.get(page.normalized_url)
+                if candidate is None:
+                    continue
+                returned.add(page.normalized_url)
+                pages.append(
+                    FetchedPage(
+                        url=page.url,
+                        normalized_url=page.normalized_url,
+                        domain=page.domain,
+                        title=candidate.result.title,
+                        text=page.text,
+                        content_hash=page.content_hash,
+                    )
+                )
+            for normalized, candidate in requested.items():
+                if normalized in returned:
+                    continue
+                error = "focused extraction returned no usable content"
+                exploration = self._failed_exploration(task, candidate)
+                self.audit.log("page.fetch_failed", exploration=exploration, error=error)
+                failures.append((exploration, error))
+        return pages, failures
+
+    @staticmethod
+    def _failed_exploration(
+        task: ResearchTask,
+        candidate: _Candidate,
+    ) -> PageExploration:
+        return PageExploration(
+            url=candidate.result.url,
+            normalized_url=candidate.normalized_url,
+            domain="",
+            fetch_status=FetchStatus.FAILED,
+            task_id=task.id,
+        )
+
     def _process_page(
         self,
         task: ResearchTask,
@@ -484,8 +590,15 @@ class Researcher:
             self.audit.log("page.fetch_failed", exploration=exploration, error=str(exc))
             return exploration, [], str(exc)
 
-        self._raise_if_cancelled(cancellation)
+        return self._process_fetched_page(task, page, cancellation)
 
+    def _process_fetched_page(
+        self,
+        task: ResearchTask,
+        page: FetchedPage,
+        cancellation: threading.Event,
+    ) -> tuple[PageExploration, list[EvidenceObservation], str | None]:
+        self._raise_if_cancelled(cancellation)
         exploration = PageExploration(
             url=page.url,
             normalized_url=page.normalized_url,

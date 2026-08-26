@@ -74,6 +74,16 @@ class PageFetcher(Protocol):
     def fetch(self, url: str, *, timeout_seconds: float) -> FetchedPage: ...
 
 
+class BatchPageExtractor(Protocol):
+    def extract(
+        self,
+        urls: list[str],
+        *,
+        query: str,
+        timeout_seconds: float,
+    ) -> list[FetchedPage]: ...
+
+
 def _post_json(
     url: str,
     payload: dict[str, Any],
@@ -423,6 +433,88 @@ class TavilySearchClient:
                     SearchResult(url=url, title=title, snippet=str(item.get("content", "")))
                 )
         return parsed
+
+
+class TavilyExtractClient:
+    """Query-focused batch extraction for URLs already selected from search."""
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        endpoint: str = "https://api.tavily.com/extract",
+        max_request_seconds: float = 30,
+        chunks_per_source: int = 5,
+    ) -> None:
+        _validate_api_key(api_key)
+        parsed_endpoint = urlsplit(endpoint)
+        if (
+            parsed_endpoint.scheme != "https"
+            or parsed_endpoint.hostname != "api.tavily.com"
+            or parsed_endpoint.port not in (None, 443)
+            or parsed_endpoint.path != "/extract"
+            or parsed_endpoint.username
+            or parsed_endpoint.password
+        ):
+            raise ValueError("Tavily endpoint must use the trusted API origin")
+        if max_request_seconds <= 0:
+            raise ValueError("max_request_seconds must be positive")
+        if not 1 <= chunks_per_source <= 5:
+            raise ValueError("chunks_per_source must be between 1 and 5")
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.max_request_seconds = max_request_seconds
+        self.chunks_per_source = chunks_per_source
+
+    def extract(
+        self,
+        urls: list[str],
+        *,
+        query: str,
+        timeout_seconds: float,
+    ) -> list[FetchedPage]:
+        if not 1 <= len(urls) <= 20:
+            raise ValueError("Tavily extraction batch must contain 1-20 URLs")
+        response = _post_json(
+            self.endpoint,
+            {
+                "urls": urls,
+                "query": query,
+                "chunks_per_source": self.chunks_per_source,
+                "extract_depth": "basic",
+                "format": "markdown",
+                "include_images": False,
+                "timeout": min(timeout_seconds, self.max_request_seconds),
+            },
+            {"Authorization": f"Bearer {self.api_key}"},
+            min(timeout_seconds, self.max_request_seconds),
+        )
+        results = response.get("results")
+        if not isinstance(results, list):
+            raise ProviderError("extract response missing results")
+        pages: list[FetchedPage] = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url")
+            raw_content = item.get("raw_content")
+            if not isinstance(url, str) or not isinstance(raw_content, str):
+                continue
+            text = " ".join(raw_content.split())
+            if not text:
+                continue
+            normalized = normalize_url(url)
+            pages.append(
+                FetchedPage(
+                    url=url,
+                    normalized_url=normalized,
+                    domain=urlsplit(normalized).netloc,
+                    title="",
+                    text=text,
+                    content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                )
+            )
+        return pages
 
 
 class _TextExtractor(HTMLParser):

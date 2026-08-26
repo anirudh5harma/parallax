@@ -14,7 +14,7 @@ from .ledger import EvidenceLedger
 from .models import Priority, ResearchResult, ResearchTask, TaskStatus, to_primitive
 from .pipeline import ResearchPipeline
 from .planner import InvalidResearchQuery, Planner
-from .providers import PageFetcher, SearchClient, StructuredModel
+from .providers import BatchPageExtractor, PageFetcher, SearchClient, StructuredModel
 from .researcher import FetchGate, Researcher
 from .urls import UrlRegistry
 
@@ -38,6 +38,7 @@ def run_query(
     model: StructuredModel,
     search: SearchClient,
     fetcher: PageFetcher,
+    batch_extractor: BatchPageExtractor | None = None,
     approved_tasks: list[ResearchTask] | None = None,
 ) -> RunArtifacts:
     if not query.strip():
@@ -65,6 +66,7 @@ def run_query(
             audit=audit,
             urls=urls,
             fetch_gate=FetchGate(config.max_concurrent_fetches),
+            batch_extractor=batch_extractor,
         ),
         critic=CriticSynthesizer(model, budget, audit),
         ledger=ledger,

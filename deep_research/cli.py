@@ -9,7 +9,12 @@ from pathlib import Path
 
 from .app import create_plan, load_plan, run_query
 from .budget import BudgetConfig
-from .providers import BedrockConverseModel, HttpPageFetcher, TavilySearchClient
+from .providers import (
+    BedrockConverseModel,
+    HttpPageFetcher,
+    TavilyExtractClient,
+    TavilySearchClient,
+)
 
 
 class ConfigurationError(ValueError):
@@ -150,6 +155,7 @@ def worker_main(argv: list[str] | None = None) -> int:
             model=model,
             search=TavilySearchClient(search_key or ""),
             fetcher=HttpPageFetcher(),
+            batch_extractor=TavilyExtractClient(search_key or ""),
             approved_tasks=(
                 load_plan(args.approved_plan, args.query)
                 if args.approved_plan is not None
