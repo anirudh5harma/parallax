@@ -48,6 +48,20 @@ class BedrockConverseModelTests(unittest.TestCase):
         self.assertEqual(2, post.call_count)
         sleep.assert_called_once_with(0)
 
+    def test_model_request_timeout_is_capped(self) -> None:
+        with patch(
+            "deep_research.providers._post_json", return_value=self._simple_response()
+        ) as post:
+            BedrockConverseModel("secret", max_request_seconds=60).generate_json(
+                system_prompt="system",
+                user_prompt="user",
+                schema_name="result",
+                schema=self._simple_schema(),
+                timeout_seconds=1800,
+            )
+
+        self.assertLessEqual(post.call_args.args[3], 60)
+
     def test_retries_schema_violation_with_correction_guidance(self) -> None:
         too_long = {
             "output": {

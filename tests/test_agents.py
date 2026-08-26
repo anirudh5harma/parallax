@@ -20,7 +20,7 @@ class PlannerTests(unittest.TestCase):
         def plan(_prompt: str) -> dict[str, object]:
             nonlocal calls
             calls += 1
-            period = "in 2024-2025" if calls == 1 else "through August 2026"
+            period = "evolving in 2024-2025" if calls == 1 else "through August 2026"
             return {
                 "disposition": "researchable",
                 "reason": "Ready for research.",
@@ -158,7 +158,11 @@ class ResearcherTests(unittest.TestCase):
         def queries(_prompt: str) -> dict[str, object]:
             nonlocal calls
             calls += 1
-            query = "market evidence 2024" if calls == 1 else "latest market evidence 2026"
+            query = (
+                "market evolving evidence 2024-2025"
+                if calls == 1
+                else "latest market evidence 2026"
+            )
             return {"queries": [{"query_text": query, "rationale": "freshness"}]}
 
         with tempfile.TemporaryDirectory() as tmp, patch(

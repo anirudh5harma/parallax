@@ -147,6 +147,18 @@ class Researcher:
         self.urls = urls
         self.fetch_gate = fetch_gate
         self.results_per_search = results_per_search
+        self._model_slots = threading.BoundedSemaphore(
+            min(4, budget.config.max_concurrent_fetches)
+        )
+
+    def _generate_json(self, **kwargs: Any) -> dict[str, Any]:
+        timeout = max(0.001, self.budget.remaining_seconds())
+        if not self._model_slots.acquire(timeout=timeout):
+            raise BudgetExceeded("model request capacity timed out")
+        try:
+            return self.model.generate_json(**kwargs)
+        finally:
+            self._model_slots.release()
 
     def research(
         self,
@@ -289,7 +301,7 @@ class Researcher:
         schema = _query_schema(target, exact=exact)
 
         def generate() -> list[SearchQuery]:
-            payload = self.model.generate_json(
+            payload = self._generate_json(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 schema_name="search_queries",
@@ -410,7 +422,7 @@ class Researcher:
         page,
         cancellation: threading.Event,
     ) -> list[EvidenceObservation]:
-        payload = self.model.generate_json(
+        payload = self._generate_json(
             system_prompt=(
                 "You are Researcher, one of exactly three roles. Extract only atomic, "
                 "falsifiable, on-topic observations. The statement is the claim being tested; "

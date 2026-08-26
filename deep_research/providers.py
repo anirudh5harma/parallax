@@ -252,6 +252,7 @@ class BedrockConverseModel:
         region: str = "us-east-1",
         max_tokens: int = 4096,
         max_attempts: int = 2,
+        max_request_seconds: float = 60,
     ) -> None:
         _validate_api_key(api_key)
         if not model_id or not region:
@@ -261,8 +262,11 @@ class BedrockConverseModel:
         self.api_key = api_key
         self.model_id = model_id
         self.region = region
+        if max_request_seconds <= 0:
+            raise ValueError("max_request_seconds must be positive")
         self.max_tokens = max_tokens
         self.max_attempts = max_attempts
+        self.max_request_seconds = max_request_seconds
 
     def generate_json(
         self,
@@ -301,9 +305,10 @@ class BedrockConverseModel:
             },
         }
         last_error: ProviderError | None = None
+        operation_timeout = min(timeout_seconds, self.max_request_seconds)
         started = time.monotonic()
         for attempt in range(self.max_attempts):
-            remaining = timeout_seconds - (time.monotonic() - started)
+            remaining = operation_timeout - (time.monotonic() - started)
             if remaining <= 0:
                 raise ProviderError("model request timed out")
             try:
@@ -332,11 +337,11 @@ class BedrockConverseModel:
                 last_error = exc
                 if not exc.retryable or attempt + 1 >= self.max_attempts:
                     break
-                remaining = timeout_seconds - (time.monotonic() - started)
+                remaining = operation_timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     break
                 delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
-                time.sleep(min(delay, max(0.0, remaining)))
+                time.sleep(min(delay, 5.0, max(0.0, remaining)))
         raise last_error or ProviderError("model request failed")
 
     @staticmethod
@@ -370,6 +375,7 @@ class TavilySearchClient:
         api_key: str,
         *,
         endpoint: str = "https://api.tavily.com/search",
+        max_request_seconds: float = 30,
     ) -> None:
         _validate_api_key(api_key)
         parsed_endpoint = urlsplit(endpoint)
@@ -382,8 +388,11 @@ class TavilySearchClient:
             or parsed_endpoint.password
         ):
             raise ValueError("Tavily endpoint must use the trusted API origin")
+        if max_request_seconds <= 0:
+            raise ValueError("max_request_seconds must be positive")
         self.api_key = api_key
         self.endpoint = endpoint
+        self.max_request_seconds = max_request_seconds
 
     def search(
         self, query: str, *, max_results: int, timeout_seconds: float
@@ -398,7 +407,7 @@ class TavilySearchClient:
                 "include_raw_content": False,
             },
             {"Authorization": f"Bearer {self.api_key}"},
-            timeout_seconds,
+            min(timeout_seconds, self.max_request_seconds),
         )
         results = response.get("results")
         if not isinstance(results, list):
@@ -460,6 +469,7 @@ class HttpPageFetcher:
         max_pdf_parse_seconds: float = 15,
         max_concurrent_pdf_extractions: int = 1,
         max_redirects: int = 3,
+        max_fetch_seconds: float = 30,
     ) -> None:
         if min(
             max_bytes,
@@ -468,6 +478,7 @@ class HttpPageFetcher:
             max_pdf_chars,
             max_pdf_parse_seconds,
             max_concurrent_pdf_extractions,
+            max_fetch_seconds,
         ) <= 0:
             raise ValueError("fetch limits must be positive")
         self.max_bytes = max_bytes
@@ -477,8 +488,10 @@ class HttpPageFetcher:
         self.max_pdf_parse_seconds = max_pdf_parse_seconds
         self._pdf_slots = threading.BoundedSemaphore(max_concurrent_pdf_extractions)
         self.max_redirects = max_redirects
+        self.max_fetch_seconds = max_fetch_seconds
 
     def fetch(self, url: str, *, timeout_seconds: float) -> FetchedPage:
+        timeout_seconds = min(timeout_seconds, self.max_fetch_seconds)
         started = time.monotonic()
         current_url = self._prepare_fetch_url(url)
         for redirect_count in range(self.max_redirects + 1):
