@@ -137,6 +137,27 @@ class CriticSynthesizerTests(unittest.TestCase):
             properties = schema["properties"][section]["items"]["properties"]
             self.assertEqual(["C1", "C2"], properties["claim_id"]["enum"])
             self.assertEqual(["S1", "S2"], properties["source_ids"]["items"]["enum"])
+        self.assertEqual(8, schema["properties"]["main_findings"]["maxItems"])
+        self.assertEqual(5, schema["properties"]["weak_evidence"]["maxItems"])
+        self.assertEqual(
+            900,
+            schema["properties"]["main_findings"]["items"]["properties"][
+                "synthesis"
+            ]["maxLength"],
+        )
+
+    def test_report_rejects_output_over_word_ceiling(self) -> None:
+        context = build_synthesis_context([], [])
+        payload = {
+            "executive_summary": "word " * 1_801,
+            "main_findings": [],
+            "contested_findings": [],
+            "weak_evidence": [],
+            "remaining_gaps": [],
+        }
+
+        with self.assertRaisesRegex(ValueError, "word limit"):
+            render_report(payload, context)
 
     def test_critic_creates_at_most_two_depth_one_followups(self) -> None:
         model = FakeModel(

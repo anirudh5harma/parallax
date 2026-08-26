@@ -48,6 +48,40 @@ class BedrockConverseModelTests(unittest.TestCase):
         self.assertEqual(2, post.call_count)
         sleep.assert_called_once_with(0)
 
+    def test_retries_schema_violation_with_correction_guidance(self) -> None:
+        too_long = {
+            "output": {
+                "message": {"content": [{"text": '{"name":"far too long"}'}]}
+            }
+        }
+        valid = {
+            "output": {"message": {"content": [{"text": '{"name":"okay"}'}]}}
+        }
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string", "maxLength": 4}},
+            "required": ["name"],
+            "additionalProperties": False,
+        }
+        with patch(
+            "deep_research.providers._post_json",
+            side_effect=[too_long, valid],
+        ) as post:
+            result = BedrockConverseModel("secret").generate_json(
+                system_prompt="system",
+                user_prompt="user",
+                schema_name="result",
+                schema=schema,
+                timeout_seconds=10,
+            )
+
+        self.assertEqual({"name": "okay"}, result)
+        corrected_payload = post.call_args_list[1].args[1]
+        description = corrected_payload["outputConfig"]["textFormat"]["structure"][
+            "jsonSchema"
+        ]["description"]
+        self.assertIn("too long", description)
+
     def test_does_not_retry_non_retryable_failure(self) -> None:
         error = ProviderError("bad request", retryable=False, status=400)
         with patch("deep_research.providers._post_json", side_effect=error) as post:
@@ -137,6 +171,8 @@ class BedrockConverseModelTests(unittest.TestCase):
         self.assertGreater(timeout, 9.9)
         self.assertNotIn("minLength", sent_schema["properties"]["name"])
         self.assertNotIn("maximum", sent_schema["properties"]["score"])
+        self.assertIn("length must be at most 20", sent_schema["properties"]["name"]["description"])
+        self.assertIn("must be at most 1", sent_schema["properties"]["score"]["description"])
         self.assertEqual(1, sent_schema["properties"]["items"]["minItems"])
         self.assertNotIn("maxItems", sent_schema["properties"]["items"])
 

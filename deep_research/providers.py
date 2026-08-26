@@ -37,6 +37,10 @@ class ProviderError(RuntimeError):
         self.retry_after = retry_after
 
 
+class SchemaValidationError(ProviderError):
+    pass
+
+
 def _validate_api_key(value: str) -> None:
     if not value or any(ord(character) < 33 or ord(character) > 126 for character in value):
         raise ValueError("API key must be non-empty printable ASCII without whitespace")
@@ -145,6 +149,24 @@ def _bedrock_schema(value: Any) -> Any:
         if key == "minItems" and item not in (0, 1):
             continue
         projected[key] = _bedrock_schema(item)
+    constraints: list[str] = []
+    for key, label in (
+        ("minLength", "length must be at least"),
+        ("maxLength", "length must be at most"),
+        ("minItems", "item count must be at least"),
+        ("maxItems", "item count must be at most"),
+        ("minimum", "must be at least"),
+        ("maximum", "must be at most"),
+        ("exclusiveMinimum", "must be greater than"),
+        ("exclusiveMaximum", "must be less than"),
+        ("multipleOf", "must be a multiple of"),
+    ):
+        if key in value and key not in projected:
+            constraints.append(f"{label} {value[key]}")
+    if constraints:
+        existing = str(projected.get("description", "")).strip()
+        guidance = "Constraints: " + "; ".join(constraints) + "."
+        projected["description"] = f"{existing} {guidance}".strip()
     return projected
 
 
@@ -164,22 +186,22 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], path: str = "$") -
     if expected is not None and not any(
         item in type_checks and type_checks[item](value) for item in expected_types
     ):
-        raise ProviderError(f"model response violates schema at {path}: wrong type")
+        raise SchemaValidationError(f"model response violates schema at {path}: wrong type")
     if "enum" in schema and value not in schema["enum"]:
-        raise ProviderError(f"model response violates schema at {path}: invalid enum")
+        raise SchemaValidationError(f"model response violates schema at {path}: invalid enum")
 
     if isinstance(value, dict):
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         missing = [key for key in required if key not in value]
         if missing:
-            raise ProviderError(
+            raise SchemaValidationError(
                 f"model response violates schema at {path}: missing {missing}"
             )
         if schema.get("additionalProperties") is False:
             extras = set(value) - set(properties)
             if extras:
-                raise ProviderError(
+                raise SchemaValidationError(
                     f"model response violates schema at {path}: extra properties"
                 )
         for key, item in value.items():
@@ -188,35 +210,35 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], path: str = "$") -
                 _validate_json_schema(item, child_schema, f"{path}.{key}")
     elif isinstance(value, list):
         if len(value) < schema.get("minItems", 0):
-            raise ProviderError(f"model response violates schema at {path}: too few items")
+            raise SchemaValidationError(f"model response violates schema at {path}: too few items")
         if "maxItems" in schema and len(value) > schema["maxItems"]:
-            raise ProviderError(f"model response violates schema at {path}: too many items")
+            raise SchemaValidationError(f"model response violates schema at {path}: too many items")
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
                 _validate_json_schema(item, item_schema, f"{path}[{index}]")
     elif isinstance(value, str):
         if len(value) < schema.get("minLength", 0):
-            raise ProviderError(f"model response violates schema at {path}: too short")
+            raise SchemaValidationError(f"model response violates schema at {path}: too short")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
-            raise ProviderError(f"model response violates schema at {path}: too long")
+            raise SchemaValidationError(f"model response violates schema at {path}: too long")
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
-            raise ProviderError(f"model response violates schema at {path}: below minimum")
+            raise SchemaValidationError(f"model response violates schema at {path}: below minimum")
         if "maximum" in schema and value > schema["maximum"]:
-            raise ProviderError(f"model response violates schema at {path}: above maximum")
+            raise SchemaValidationError(f"model response violates schema at {path}: above maximum")
         if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
-            raise ProviderError(
+            raise SchemaValidationError(
                 f"model response violates schema at {path}: below exclusive minimum"
             )
         if "exclusiveMaximum" in schema and value >= schema["exclusiveMaximum"]:
-            raise ProviderError(
+            raise SchemaValidationError(
                 f"model response violates schema at {path}: above exclusive maximum"
             )
         if "multipleOf" in schema:
             quotient = value / schema["multipleOf"]
             if not math.isclose(quotient, round(quotient)):
-                raise ProviderError(
+                raise SchemaValidationError(
                     f"model response violates schema at {path}: invalid multiple"
                 )
 
@@ -294,6 +316,18 @@ class BedrockConverseModel:
                 value = self._extract_json(response)
                 _validate_json_schema(value, schema)
                 return value
+            except SchemaValidationError as exc:
+                last_error = exc
+                if attempt + 1 >= self.max_attempts:
+                    break
+                json_schema = payload["outputConfig"]["textFormat"]["structure"][
+                    "jsonSchema"
+                ]
+                json_schema["description"] = (
+                    f"Structured output for {schema_name}. Correct the prior validation "
+                    f"failure: {str(exc)[:300]}"
+                )
+                continue
             except ProviderError as exc:
                 last_error = exc
                 if not exc.retryable or attempt + 1 >= self.max_attempts:

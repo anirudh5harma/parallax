@@ -74,8 +74,12 @@ FINDING_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "claim_id": {"type": "string"},
-        "synthesis": {"type": "string"},
-        "source_ids": {"type": "array", "items": {"type": "string"}},
+        "synthesis": {"type": "string", "maxLength": 900},
+        "source_ids": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {"type": "string"},
+        },
     },
     "required": ["claim_id", "synthesis", "source_ids"],
     "additionalProperties": False,
@@ -84,11 +88,23 @@ FINDING_SCHEMA: dict[str, Any] = {
 REPORT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "executive_summary": {"type": "string"},
-        "main_findings": {"type": "array", "items": FINDING_SCHEMA},
+        "executive_summary": {"type": "string", "maxLength": 1_600},
+        "main_findings": {
+            "type": "array",
+            "maxItems": 8,
+            "items": FINDING_SCHEMA,
+        },
         "contested_findings": {"type": "array", "items": FINDING_SCHEMA},
-        "weak_evidence": {"type": "array", "items": FINDING_SCHEMA},
-        "remaining_gaps": {"type": "array", "items": {"type": "string"}},
+        "weak_evidence": {
+            "type": "array",
+            "maxItems": 5,
+            "items": FINDING_SCHEMA,
+        },
+        "remaining_gaps": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 300},
+        },
     },
     "required": [
         "executive_summary",

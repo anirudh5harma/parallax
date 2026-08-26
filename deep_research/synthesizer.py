@@ -11,6 +11,9 @@ class CitationError(ValueError):
     pass
 
 
+MAX_REPORT_WORDS = 1_800
+
+
 @dataclass(frozen=True, slots=True)
 class SynthesisContext:
     packet: list[dict[str, object]]
@@ -184,7 +187,13 @@ def render_report(
             sections.append(f"- {source_id}: {context.source_urls[source_id]}")
     else:
         sections.append("- No sources cited because evidence was insufficient.")
-    return "\n".join(sections).strip() + "\n"
+    report = "\n".join(sections).strip() + "\n"
+    word_count = len(report.split())
+    if word_count > MAX_REPORT_WORDS:
+        raise ValueError(
+            f"report exceeds {MAX_REPORT_WORDS}-word limit: {word_count} words"
+        )
+    return report
 
 
 def _validate_section_membership(
