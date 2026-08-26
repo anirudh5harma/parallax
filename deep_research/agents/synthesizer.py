@@ -565,6 +565,11 @@ def _validated_claim_item(
     allowed = context.allowed_sources_by_claim[claim_id]
     if section == "main_findings":
         allowed = context.supporting_sources_by_claim[claim_id]
+    elif (
+        not context.supporting_sources_by_claim[claim_id]
+        and context.contradicting_sources_by_claim[claim_id]
+    ):
+        allowed = context.contradicting_sources_by_claim[claim_id]
     invalid = claim_source_ids - allowed
     if invalid:
         raise CitationError(

@@ -527,6 +527,12 @@ class CriticSynthesizerTests(unittest.TestCase):
                     source_domain="contradict.example",
                     statement="X improves Y.", polarity=Polarity.CONTRADICT,
                     excerpt="No measured effect.",
+                ), EvidenceObservation(
+                    observation_id="O2", task_id="T1",
+                    source_url="https://neutral.example/a",
+                    source_domain="neutral.example",
+                    statement="X improves Y.", polarity=Polarity.NEUTRAL,
+                    excerpt="The outcome was not measured.",
                 )]
             )
             claim = ledger.claims()[0]
@@ -552,6 +558,26 @@ class CriticSynthesizerTests(unittest.TestCase):
                 },
                 context,
             )
+            neutral_source_id = next(
+                source
+                for source in context.allowed_sources_by_claim[claim.claim_id]
+                if source not in context.contradicting_sources_by_claim[claim.claim_id]
+            )
+            with self.assertRaisesRegex(CitationError, "do not support"):
+                render_report(
+                    {
+                        "executive_summary": "Ignored.",
+                        "main_findings": [],
+                        "contested_findings": [{
+                            "claim_id": claim.claim_id,
+                            "synthesis": "The proposition is contradicted.",
+                            "source_ids": [neutral_source_id],
+                        }],
+                        "weak_evidence": [],
+                        "remaining_gaps": [],
+                    },
+                    context,
+                )
 
         self.assertEqual(frozenset({claim.claim_id}), context.contested_claim_ids)
         self.assertFalse(claim.disagreement_flag)
