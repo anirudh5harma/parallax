@@ -777,8 +777,11 @@ class Researcher:
         payload = self._generate_json(
             system_prompt=(
                 "You are Researcher, one of exactly three roles. Extract only atomic, "
-                "falsifiable, on-topic observations. The statement is the claim being tested; "
-                "polarity says whether this page supports or contradicts it. Every excerpt "
+                "falsifiable, on-topic observations. Write statement as a source-independent "
+                "proposition with all material population, timeframe, and outcome qualifiers. "
+                "For contradicting evidence, state the proposition being contradicted rather "
+                "than rewriting the source's opposing conclusion as a new claim. Polarity says "
+                "whether this page supports or contradicts that proposition. Every excerpt "
                 "must be one short, continuous, verbatim substring copied from the supplied "
                 "page text, with identical words and punctuation; never paraphrase, splice, "
                 "or insert ellipses. Return at most four observations. Return zero "
