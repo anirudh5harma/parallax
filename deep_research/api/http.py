@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import threading
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,7 +32,7 @@ GLOBAL_LIMITS = {"plan": 50, "run": 20, "branch": 20}
 
 class AnonymousWorkspaceQuota:
     def __init__(self) -> None:
-        self._counts: dict[tuple[str, str, str], int] = defaultdict(int)
+        self._counts: dict[tuple[str, str, str], int] = {}
         self._day: str | None = None
         self._lock = threading.Lock()
 
@@ -52,21 +51,21 @@ class AnonymousWorkspaceQuota:
             if self._day != day:
                 self._counts.clear()
                 self._day = day
-            if self._counts[key] >= WORKSPACE_LIMITS[action]:
+            if self._counts.get(key, 0) >= WORKSPACE_LIMITS[action]:
                 raise SessionCapacityError(
                     f"daily anonymous {action} quota reached for this workspace"
                 )
-            if self._counts[client_key] >= CLIENT_LIMITS[action]:
+            if self._counts.get(client_key, 0) >= CLIENT_LIMITS[action]:
                 raise SessionCapacityError(
                     f"daily anonymous {action} quota reached for this client"
                 )
-            if self._counts[global_key] >= GLOBAL_LIMITS[action]:
+            if self._counts.get(global_key, 0) >= GLOBAL_LIMITS[action]:
                 raise SessionCapacityError(
                     f"daily anonymous {action} capacity reached for this service"
                 )
-            self._counts[key] += 1
-            self._counts[client_key] += 1
-            self._counts[global_key] += 1
+            self._counts[key] = self._counts.get(key, 0) + 1
+            self._counts[client_key] = self._counts.get(client_key, 0) + 1
+            self._counts[global_key] = self._counts.get(global_key, 0) + 1
 
     def refund(
         self,
@@ -80,10 +79,16 @@ class AnonymousWorkspaceQuota:
         client_key = (day, f"client:{client_id or workspace_id}", action)
         global_key = (day, "__global__", action)
         with self._lock:
-            if self._counts[key] > 0:
-                self._counts[key] -= 1
-                self._counts[client_key] = max(0, self._counts[client_key] - 1)
-                self._counts[global_key] = max(0, self._counts[global_key] - 1)
+            if self._counts.get(key, 0) > 0:
+                self._counts[key] = self._counts.get(key, 0) - 1
+                self._counts[client_key] = max(
+                    0,
+                    self._counts.get(client_key, 0) - 1,
+                )
+                self._counts[global_key] = max(
+                    0,
+                    self._counts.get(global_key, 0) - 1,
+                )
 
 
 def _workspace_id(value: str) -> str:

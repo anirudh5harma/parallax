@@ -168,6 +168,18 @@ class LocalApiBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(SessionCapacityError, "this client"):
             quota.reserve("f" * 32, "plan", client_id="same-client")
 
+    def test_rejected_rotating_keys_do_not_grow_quota_state(self) -> None:
+        quota = AnonymousWorkspaceQuota()
+        for index in range(10):
+            quota.reserve(f"{index:032x}", "plan", client_id="same-client")
+        baseline_size = len(quota._counts)
+
+        for index in range(1_000, 2_000):
+            with self.assertRaises(SessionCapacityError):
+                quota.reserve(f"{index:032x}", "plan", client_id="same-client")
+
+        self.assertEqual(baseline_size, len(quota._counts))
+
     def test_oversized_request_is_rejected_before_parsing(self) -> None:
         client = TestClient(create_app(ResearchSessionService(auto_start=False)))
 
