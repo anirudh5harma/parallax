@@ -161,6 +161,11 @@ def _provider_http_failure(url: str, status: int, detail: str) -> tuple[str, str
                 "bedrock_rate_limited",
                 "Bedrock is rate-limiting this workspace. Wait briefly, then retry.",
             )
+        if status in {408, 409}:
+            return (
+                "bedrock_unavailable",
+                "Bedrock could not complete the request. Try again shortly.",
+            )
         if 400 <= status < 500:
             return (
                 "bedrock_request_rejected",
@@ -182,6 +187,11 @@ def _provider_http_failure(url: str, status: int, detail: str) -> tuple[str, str
             return (
                 "tavily_rate_limited",
                 "Web search is rate-limited. Wait briefly, then retry.",
+            )
+        if status in {408, 409}:
+            return (
+                "tavily_unavailable",
+                "Web search could not complete the request. Try again shortly.",
             )
         if 400 <= status < 500:
             return (

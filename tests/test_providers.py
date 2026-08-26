@@ -46,6 +46,15 @@ class BedrockConverseModelTests(unittest.TestCase):
         self.assertEqual(
             ("bedrock", False), provider_error_context(bedrock_bad_request[0])
         )
+        for response_status in (408, 409):
+            with self.subTest(response_status=response_status):
+                code, _message = _provider_http_failure(
+                    "https://api.tavily.com/search",
+                    response_status,
+                    ": temporary",
+                )
+                self.assertEqual("tavily_unavailable", code)
+                self.assertEqual(("tavily", True), provider_error_context(code))
 
     @staticmethod
     def _simple_response() -> dict[str, object]:
