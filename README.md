@@ -1,50 +1,59 @@
-# Transparent Deep Research
+# Parallax
 
-Small CLI research system that preserves evidence strength and disagreement instead of producing only a polished answer.
+Evidence-aware deep research that keeps support, contradiction, confidence, and unresolved gaps visible.
 
 Live app: [parallax-five-sepia.vercel.app](https://parallax-five-sepia.vercel.app)
 
-## Run
+## What it does
 
-Requires Python 3.11+ and two environment variables:
+Parallax turns a research question into four focused tasks, screens a broad set of web results in parallel, deeply extracts the strongest sources, and produces a concise cited report. Users review the plan before research begins and can start a new research path from contradicting evidence.
+
+The web app provides streaming progress, concurrent sessions, source inspection, PDF extraction, invalid-query checks, and actionable provider errors. State is in memory; every run also writes an inspectable Evidence Ledger and JSONL audit trail.
+
+## Run locally
+
+Requires Python 3.11+, Node.js 24, and:
 
 ```bash
 export AWS_BEARER_TOKEN_BEDROCK="..."
 export TAVILY_API_KEY="..."
-python -m deep_research "What evidence supports and challenges remote work productivity?"
 ```
 
-Optional: set `AWS_REGION` and `BEDROCK_MODEL_ID`. Defaults are `us-east-1` and `us.anthropic.claude-sonnet-4-6`.
-
-Local web workspace:
+Start the API and frontend in separate terminals:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -e '.[dev]'
 deep-research-api
-cd frontend && npm install && npm run dev
 ```
 
-Open `http://localhost:3000`. Web research defaults to Sonnet 4.6 through Bedrock and the serious profile: up to 100 searches, 600 pages, 12 concurrent fetches, and 30 minutes. Sessions stay in memory and support new research paths from contradicting citations.
+```bash
+cd frontend
+npm ci
+npm run dev
+```
 
-For deployment, use `frontend/` as the Vercel root and the repository root as a Render Blueprint. Set `NEXT_PUBLIC_RESEARCH_API_URL` on Vercel. Keep Bedrock and Tavily keys on Render, then set `WEB_ALLOWED_ORIGINS` and `WEB_ALLOWED_HOSTS` to explicit production values. Anonymous workspaces have in-memory daily quotas; add platform IP rate limits before public launch.
+Open `http://localhost:3000`.
 
-Default `dev` budget: 4 primary tasks, 2 follow-ups, 24 searches, 40 pages, 8 concurrent fetches, 5-minute timeout. Larger run:
+The default region is `us-east-1`; the default model is `us.anthropic.claude-sonnet-4-6`. Override CLI runs with `BEDROCK_MODEL_ID` and web runs with `BEDROCK_WEB_MODEL_ID`.
+
+CLI usage:
 
 ```bash
+python -m deep_research "What evidence supports and challenges remote work productivity?"
 python -m deep_research "Your question" --profile serious
 ```
 
-`serious` allows 100 searches, 600 pages, 12 concurrent fetches, and 30 minutes. It screens broad results, then deeply extracts at most 30 ranked sources per task. CLI overrides remain bounded by absolute guards.
+## Research bounds
 
-## Architecture
+Exactly three roles are used:
 
-Exactly three roles:
+1. **Planner** creates four focused primary tasks.
+2. **Researcher** searches in parallel, deduplicates URLs, ranks sources, and compresses pages into validated evidence.
+3. **Critic/Synthesizer** checks coverage, may create at most two depth-one follow-ups, then writes the report.
 
-1. **Planner** creates four focused, non-overlapping primary tasks.
-2. **Researcher** runs tasks in parallel, deduplicates URLs, fetches pages under one shared concurrency gate, and compresses each page into validated evidence observations.
-3. **Critic/Synthesizer** checks coverage, may create at most two depth-1 follow-ups total, performs one final check, then writes the report.
-
-Researchers return immutable results. One controlled writer updates the in-memory ledger. Synthesis receives structured claims and short excerpts, never raw pages.
+The serious profile enforces ceilings of 100 searches, 600 page reservations, 12 concurrent fetches, six total tasks, depth one, and 30 minutes. These are safety limits, not targets. A typical broad run screens hundreds of search results, then deeply extracts at most 30 ranked sources per task. Raw pages are never passed wholesale into synthesis.
 
 Confidence is computed in code:
 
@@ -53,25 +62,36 @@ Confidence is computed in code:
 - **Low:** 1 supporting domain or at least 2 contradicting domains
 - **Insufficient:** no supporting domains
 
-## Outputs
+## Run artifacts
 
-Each run creates one directory under `runs/`:
+Each run writes:
 
-- `report.md` - cited report with confidence, contradictions, weak evidence, and gaps
-- `ledger.json` - complete claims and observations
-- `events.jsonl` - append-only audit trail
+- `report.md` - cited final report
+- `ledger.json` - claims, observations, polarity, and confidence
+- `events.jsonl` - append-only audit events
 - `run.json` - tasks, critic checks, budget usage, and status
 
-Source IDs are assigned deterministically. Unknown or claim-mismatched citations fail validation.
+Source IDs are deterministic. Unknown or claim-mismatched citations fail validation.
+
+## Deployment
+
+- Frontend: Vercel, rooted at `frontend/`
+- Backend: Render, configured by `render.yaml`
+- Pushes to `main` deploy the frontend through Vercel's Git integration. Backend code or configuration changes trigger Render through `.github/workflows/deploy-backend.yml`.
+
+Production secrets stay in the hosting platforms. `NEXT_PUBLIC_RESEARCH_API_URL` points the frontend to Render; the backend uses explicit allowed origins and hosts.
+
+The current public deployment uses a free Render instance. It can cold-start after inactivity, and restarts clear in-memory sessions and process-local anonymous quotas. V1 has no authentication or persistent database.
 
 ## Tests
 
 ```bash
 python -m unittest discover -s tests -v
+cd frontend && npm run lint && npm run build
 ```
-
-Tests cover hard ceilings, depth rejection, concurrency, deduplication, literal excerpt validation, confidence rules, follow-up limits, citation validation, and full orchestration.
 
 ## V1 boundaries
 
-No agent framework, database, embeddings, auth, multi-turn memory, deep recursion, or semantic claim merging. Similar claims stay separate unless their normalized text matches exactly.
+No agent framework, agent swarm, database, embeddings, deep recursion, multi-turn memory, or semantic claim merging. Similar claims remain separate unless their normalized text matches exactly.
+
+See [DECISION_NOTE.md](DECISION_NOTE.md) for the architecture and scope rationale.
