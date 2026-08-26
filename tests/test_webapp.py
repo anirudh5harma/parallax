@@ -180,6 +180,16 @@ class LocalApiBoundaryTests(unittest.TestCase):
 
         self.assertEqual(baseline_size, len(quota._counts))
 
+    def test_refunded_rotating_keys_do_not_grow_quota_state(self) -> None:
+        quota = AnonymousWorkspaceQuota()
+
+        for index in range(1_000):
+            workspace = f"{index:032x}"
+            quota.reserve(workspace, "plan", client_id="same-client")
+            quota.refund(workspace, "plan", client_id="same-client")
+
+        self.assertEqual({}, quota._counts)
+
     def test_oversized_request_is_rejected_before_parsing(self) -> None:
         client = TestClient(create_app(ResearchSessionService(auto_start=False)))
 

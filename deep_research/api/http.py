@@ -80,15 +80,12 @@ class AnonymousWorkspaceQuota:
         global_key = (day, "__global__", action)
         with self._lock:
             if self._counts.get(key, 0) > 0:
-                self._counts[key] = self._counts.get(key, 0) - 1
-                self._counts[client_key] = max(
-                    0,
-                    self._counts.get(client_key, 0) - 1,
-                )
-                self._counts[global_key] = max(
-                    0,
-                    self._counts.get(global_key, 0) - 1,
-                )
+                for counter_key in (key, client_key, global_key):
+                    remaining = max(0, self._counts.get(counter_key, 0) - 1)
+                    if remaining:
+                        self._counts[counter_key] = remaining
+                    else:
+                        self._counts.pop(counter_key, None)
 
 
 def _workspace_id(value: str) -> str:
