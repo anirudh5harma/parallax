@@ -7,7 +7,6 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ApiError, EvidenceClaim, Observation, SessionDetail, SessionStatus, SessionSummary, api, eventStreamUrl } from '../lib/api';
 
-type View = 'answer' | 'process';
 type Activity = { id: string; message: string; stage?: string; sourceDomain?: string; taskId?: string; tone?: 'warning' | 'done' };
 type DrawerSelection = { claim: EvidenceClaim; observation: Observation };
 type ErrorNotice = { title: string; body: string; code?: string; retry?: () => void };
@@ -167,7 +166,6 @@ export default function Home() {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [streamedReport, setStreamedReport] = useState('');
-  const [view, setView] = useState<View>('answer');
   const [drawer, setDrawer] = useState<DrawerSelection | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [error, setError] = useState<ErrorNotice | null>(null);
@@ -223,7 +221,7 @@ export default function Home() {
   }, [connect]);
 
   function selectSession(session: SessionSummary) {
-    window.history.replaceState(null, '', '/'); streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = session.id; setActiveId(session.id); setComposing(false); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); connect(session);
+    window.history.replaceState(null, '', '/'); streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = session.id; setActiveId(session.id); setComposing(false); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); connect(session);
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); await createPlan();
@@ -246,13 +244,13 @@ export default function Home() {
     catch (cause) { setError(errorNotice(cause, 'Evidence path could not start', () => void startBranch(observation))); }
     finally { setBranching(null); }
   }
-  function newResearch() { router.push('/?new=1'); streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = null; setActiveId(null); setComposing(true); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); }
+  function newResearch() { router.push('/?new=1'); streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = null; setActiveId(null); setComposing(true); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); }
   const openCitation = useCallback((claimId: string, sourceId: string) => { const selection = findCitation(detail?.evidence ?? [], claimId, sourceId); if (selection) setDrawer(selection); }, [detail]);
 
   return <main className="shell">
     <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}><div className="brand"><span className="brand-orbit" aria-hidden="true" /><strong>Parallax</strong></div><Link className="new-thread" href="/?new=1" onClick={(event) => { event.preventDefault(); newResearch(); }}><span>＋</span> New research</Link><p className="sidebar-label">Your research</p><nav className="history" aria-label="Research history">{orderedSessions.length === 0 && <p className="history-empty">Research sessions will appear here.</p>}{orderedSessions.map(({ session, depth }) => <SessionItem active={activeId === session.id} depth={depth} key={session.id} onClick={() => selectSession(session)} session={session} />)}</nav></aside>
     <button className="mobile-menu" onClick={() => setSidebarOpen((value) => !value)} type="button" aria-label="Toggle research history">☰</button>
-    <section className="main-column">{!active ? <Welcome query={query} setQuery={setQuery} submit={submit} busy={busy} configured={configured} /> : <ResearchConversation active={active} activity={activity} busy={busy} detail={detail} newResearch={newResearch} openCitation={openCitation} report={renderedReport} setView={setView} startResearch={startResearch} view={view} />}</section>
+    <section className="main-column">{!active ? <Welcome query={query} setQuery={setQuery} submit={submit} busy={busy} configured={configured} /> : <ResearchConversation active={active} activity={activity} busy={busy} detail={detail} newResearch={newResearch} openCitation={openCitation} report={renderedReport} startResearch={startResearch} />}</section>
     {drawer && <EvidenceDrawer branching={branching} close={() => setDrawer(null)} selection={drawer} startBranch={startBranch} />}
     {error && <ErrorModal close={() => setError(null)} notice={error} />}
   </main>;
@@ -262,8 +260,8 @@ function Welcome({ query, setQuery, submit, busy, configured }: { query: string;
   return <div className="welcome"><div className="welcome-mark"><span /><span /></div><h1>What should we research?</h1><p>Ask a complex question. Review the plan before any sources are searched.</p><form className="composer" onSubmit={submit}><textarea autoFocus onChange={(event) => setQuery(event.target.value)} placeholder="Ask a research question…" rows={4} value={query} /><div><span>Evidence-aware deep research</span><button disabled={!query.trim() || busy || configured === false} type="submit">{busy ? 'Planning…' : 'Create plan'} <i aria-hidden="true">↑</i></button></div></form><div className="examples">{examples.map((example) => <button key={example} onClick={() => setQuery(example)} type="button">{example}</button>)}</div></div>;
 }
 
-function ResearchConversation({ active, activity, busy, detail, newResearch, openCitation, report, setView, startResearch, view }: { active: SessionSummary; activity: Activity[]; busy: boolean; detail: SessionDetail | null; newResearch: () => void; openCitation: (claimId: string, sourceId: string) => void; report: string; setView: (view: View) => void; startResearch: () => void; view: View }) {
-  return <div className="conversation"><header className="conversation-header"><div><p>{active.branch ? `Branched from ${active.branch.source_id}` : 'Deep research'}</p><strong>{active.title}</strong></div><span className={`run-status status-${active.status}`}><i />{statusLabel(active.status)}</span></header><div className="thread"><div className="user-message"><p>{active.branch?.claim_text ?? active.query}</p></div>{active.status === 'planning' && <PlanningState />}{active.status === 'ready' && <PlanReview plan={active.plan} busy={busy} start={startResearch} />}{(active.status === 'queued' || active.status === 'running') && <ResearchingState activity={activity} plan={active.plan} />}{active.status === 'failed' && <div className="assistant-message failure"><span className="assistant-mark">P</span><div><h2>Research stopped</h2><p>{active.error ?? activity.at(-1)?.message ?? 'Research could not complete.'}</p></div></div>}{active.status === 'rejected' && <div className="assistant-message revision"><span className="assistant-mark">P</span><div><h2>This needs a clearer research question</h2><p>{active.error ?? 'Add a specific topic, comparison, outcome, or time range.'}</p><button onClick={newResearch} type="button">Rewrite question</button></div></div>}{(active.status === 'synthesizing' || (terminal.has(active.status) && !['failed', 'rejected'].includes(active.status))) && <div className="response-area"><div className="answer-tabs"><button className={view === 'answer' ? 'active' : ''} onClick={() => setView('answer')} type="button">Answer</button><button className={view === 'process' ? 'active' : ''} onClick={() => setView('process')} type="button">Research process</button></div>{view === 'answer' ? active.status === 'synthesizing' && !report ? <FinalizingState /> : <Report report={report} evidence={detail?.evidence ?? []} openCitation={openCitation} streaming={active.status === 'synthesizing'} /> : <ProcessView activity={activity} detail={detail} plan={active.plan} />}</div>}</div></div>;
+function ResearchConversation({ active, activity, busy, detail, newResearch, openCitation, report, startResearch }: { active: SessionSummary; activity: Activity[]; busy: boolean; detail: SessionDetail | null; newResearch: () => void; openCitation: (claimId: string, sourceId: string) => void; report: string; startResearch: () => void }) {
+  return <div className="conversation"><header className="conversation-header"><div><p>{active.branch ? `Branched from ${active.branch.source_id}` : 'Deep research'}</p><strong>{active.title}</strong></div><span className={`run-status status-${active.status}`}><i />{statusLabel(active.status)}</span></header><div className="thread"><div className="user-message"><p>{active.branch?.claim_text ?? active.query}</p></div>{active.status === 'planning' && <PlanningState />}{active.status === 'ready' && <PlanReview plan={active.plan} busy={busy} start={startResearch} />}{(active.status === 'queued' || active.status === 'running') && <ResearchingState activity={activity} plan={active.plan} />}{active.status === 'failed' && <div className="assistant-message failure"><span className="assistant-mark">P</span><div><h2>Research stopped</h2><p>{active.error ?? activity.at(-1)?.message ?? 'Research could not complete.'}</p></div></div>}{active.status === 'rejected' && <div className="assistant-message revision"><span className="assistant-mark">P</span><div><h2>This needs a clearer research question</h2><p>{active.error ?? 'Add a specific topic, comparison, outcome, or time range.'}</p><button onClick={newResearch} type="button">Rewrite question</button></div></div>}{(active.status === 'synthesizing' || (terminal.has(active.status) && !['failed', 'rejected'].includes(active.status))) && <div className="response-area">{active.status === 'synthesizing' && !report ? <FinalizingState /> : <Report report={report} evidence={detail?.evidence ?? []} openCitation={openCitation} streaming={active.status === 'synthesizing'} />}</div>}</div></div>;
 }
 
 function PlanningState() { return <div className="assistant-message"><span className="assistant-mark thinking">P</span><div className="planning-copy"><h2>Building an actionable plan</h2><p>Breaking your question into focused, non-overlapping evidence paths.</p><div className="thinking-lines"><span /><span /><span /></div></div></div>; }
@@ -324,18 +322,6 @@ function ResearchingState({ activity, plan }: { activity: Activity[]; plan: Sess
 
 function Report({ report, evidence, openCitation, streaming }: { report: string; evidence: EvidenceClaim[]; openCitation: (claimId: string, sourceId: string) => void; streaming: boolean }) {
   return <div className="assistant-message report-message"><span className="assistant-mark">P</span><article className="report"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: () => null, a: ({ href, children }) => { if (href?.startsWith('#evidence-')) { const match = href.match(/^#evidence-(.+)-(S\d+)$/); const claimId = match?.[1] ?? ''; const sourceId = match?.[2] ?? ''; const exists = evidence.some((claim) => claim.claim_id === claimId && claim.observations.some((item) => item.source_id === sourceId)); return exists ? <button className="citation" onClick={() => openCitation(claimId, sourceId)} onFocus={() => openCitation(claimId, sourceId)} onMouseEnter={() => openCitation(claimId, sourceId)} type="button">{children}</button> : <span>{children}</span>; } return <span>{children}</span>; } }}>{report}</ReactMarkdown>{streaming && <span className="stream-caret" aria-label="Answer is streaming" />}</article></div>;
-}
-
-function ProcessView({ activity, detail, plan }: { activity: Activity[]; detail: SessionDetail | null; plan: SessionSummary['plan'] }) {
-  const count = (stage: string) => activity.filter((item) => item.stage === stage).length;
-  const stages = [
-    ['Plan approved', `${plan.length} focused evidence paths`],
-    ['Sources searched', `${count('search.executed')} focused searches`],
-    ['Pages compressed', `${count('page.explored')} pages processed · ${count('page.fetch_failed')} unavailable`],
-    ['Evidence ledger built', `${count('observation.extracted') + count('ledger.contradiction_added')} atomic observations`],
-    ['Critic and answer complete', `${count('critic.followup_created')} bounded follow-up paths`],
-  ];
-  return <div className="process-view"><div className="process-summary"><strong>{plan.length}</strong><span>planned paths</span><strong>{detail?.evidence.length ?? 0}</strong><span>ledger claims</span><strong>{detail?.evidence.filter((claim) => claim.disagreement).length ?? 0}</strong><span>contested</span></div><ol>{stages.map(([title, summary]) => <li key={title}><span className="done">✓</span><div><strong>{title}</strong><small>{summary}</small></div></li>)}</ol></div>;
 }
 
 function EvidenceDrawer({ branching, close, selection, startBranch }: { branching: string | null; close: () => void; selection: DrawerSelection; startBranch: (observation: Observation) => void }) {
