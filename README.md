@@ -42,7 +42,8 @@ CLI usage:
 
 ```bash
 python -m deep_research "What evidence supports and challenges remote work productivity?"
-python -m deep_research "Your question" --profile serious
+python -m deep_research "Your question" --profile fast
+python -m deep_research "Your question" --profile deep
 ```
 
 ## Research bounds
@@ -53,7 +54,12 @@ Exactly three roles are used:
 2. **Researcher** searches in parallel, deduplicates URLs, ranks sources, and compresses pages into validated evidence.
 3. **Critic/Synthesizer** checks coverage, may create at most two depth-one follow-ups, then writes the report.
 
-The serious profile enforces ceilings of 100 searches, 600 page reservations, 12 concurrent fetches, six total tasks, depth one, and 30 minutes. These are safety limits, not guarantees: unavailable, duplicate, weak, or late sources may stop a run below them. Broad runs screen hundreds of results and can spend the full page budget across the Planner's task shares. Raw pages are never passed wholesale into synthesis.
+The web app offers two bounded modes:
+
+- **Fast:** up to 600 sources screened, 220 pages read, one follow-up, and 15 minutes.
+- **Deep:** up to 800 sources screened, 400 pages read, two follow-ups, and 20 minutes.
+
+Both use 12 concurrent fetches, batch page compression with literal-excerpt validation, and reserve budget for critic-directed follow-ups. Branched runs reuse the selected parent evidence and skip its URLs. These are ceilings, not targets; weak, duplicate, unavailable, or unnecessary sources are skipped. Raw pages are never passed wholesale into synthesis.
 
 Confidence is computed in code:
 
