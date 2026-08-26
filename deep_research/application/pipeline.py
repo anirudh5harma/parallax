@@ -86,6 +86,7 @@ class ResearchPipeline:
             claims=self.ledger.claims(),
             observations=self.ledger.observations(),
             remaining_gaps=final.remaining_gaps,
+            contested_claim_ids=final.contested_claim_ids,
         )
         return PipelineResult(
             report=report,

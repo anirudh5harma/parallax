@@ -21,6 +21,7 @@ class SynthesisContext:
     source_urls: dict[str, str]
     claims_by_id: dict[str, EvidenceClaim]
     allowed_sources_by_claim: dict[str, set[str]]
+    contested_claim_ids: frozenset[str]
     omitted_contested_count: int
 
 
@@ -28,6 +29,7 @@ def build_synthesis_context(
     claims: list[EvidenceClaim],
     observations: list[EvidenceObservation],
     *,
+    critic_contested_claim_ids: list[str] | None = None,
     max_claims: int = 60,
     max_contested_claims: int = 6,
     max_contested_title_words: int = 300,
@@ -40,16 +42,28 @@ def build_synthesis_context(
         observation.observation_id: observation for observation in observations
     }
     confidence_rank = {"High": 0, "Moderate": 1, "Low": 2, "Insufficient": 3}
+    critic_contested = set(critic_contested_claim_ids or [])
+    effective_contested = {
+        claim.claim_id
+        for claim in claims
+        if claim.disagreement_flag
+        or (
+            claim.claim_id in critic_contested
+            and bool(claim.contradicting_observations)
+        )
+    }
     ranked_claims = sorted(
         claims,
         key=lambda claim: (
-            0 if claim.disagreement_flag else 1,
+            0 if claim.claim_id in effective_contested else 1,
             confidence_rank[claim.confidence_tag.value],
             -claim.supporting_domain_count,
             claim.claim_id,
         ),
     )
-    contested_candidates = [claim for claim in ranked_claims if claim.disagreement_flag]
+    contested_candidates = [
+        claim for claim in ranked_claims if claim.claim_id in effective_contested
+    ]
     contested: list[EvidenceClaim] = []
     contested_title_words = 0
     for claim in contested_candidates:
@@ -60,7 +74,9 @@ def build_synthesis_context(
         contested_title_words += title_words
         if len(contested) >= max_contested_claims:
             break
-    uncontested = [claim for claim in ranked_claims if not claim.disagreement_flag]
+    uncontested = [
+        claim for claim in ranked_claims if claim.claim_id not in effective_contested
+    ]
     ranked = (contested + uncontested)[:max_claims]
     packet: list[dict[str, object]] = []
     allowed_sources_by_claim: dict[str, set[str]] = {}
@@ -102,7 +118,7 @@ def build_synthesis_context(
                 "confidence": claim.confidence_tag.value,
                 "supporting_domain_count": claim.supporting_domain_count,
                 "contradicting_domain_count": claim.contradicting_domain_count,
-                "disagreement": claim.disagreement_flag,
+                "disagreement": claim.claim_id in effective_contested,
                 "support": compact(support),
                 "contradiction": compact(contradict),
                 "neutral": compact(neutral),
@@ -113,6 +129,9 @@ def build_synthesis_context(
         source_urls=source_urls,
         claims_by_id={claim.claim_id: claim for claim in ranked},
         allowed_sources_by_claim=allowed_sources_by_claim,
+        contested_claim_ids=frozenset(
+            claim.claim_id for claim in contested
+        ),
         omitted_contested_count=len(contested_candidates) - len(contested),
     )
 
@@ -200,12 +219,12 @@ def build_fallback_report_payload(
             "claim_id": claim_id,
             "synthesis": (
                 f"Sources disagree about this finding: {statement}"
-                if claim.disagreement_flag
+                if claim_id in context.contested_claim_ids
                 else statement
             ),
             "source_ids": source_ids,
         }
-        if claim.disagreement_flag:
+        if claim_id in context.contested_claim_ids:
             contested.append(finding)
             finding_words += len(claim.text.split()) + len(statement.split()) + 20
         elif finding_words + len(claim.text.split()) + len(statement.split()) + 20 > finding_word_budget:
@@ -367,11 +386,7 @@ def _validate_section_membership(
             if isinstance(item, dict)
         }
         section_ids[section] = ids
-    disputed = {
-        claim_id
-        for claim_id, claim in context.claims_by_id.items()
-        if claim.disagreement_flag
-    }
+    disputed = set(context.contested_claim_ids)
     misplaced = disputed & (
         section_ids["main_findings"] | section_ids["weak_evidence"]
     )

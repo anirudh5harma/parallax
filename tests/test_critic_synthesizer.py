@@ -171,6 +171,55 @@ class CriticSynthesizerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-disputed claims"):
                 render_report(payload, context)
 
+    def test_critic_can_surface_contradiction_only_claim_without_merging_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            ledger.add_observations(
+                [EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://contradict.example/a",
+                    source_domain="contradict.example",
+                    statement="X improves Y.", polarity=Polarity.CONTRADICT,
+                    excerpt="No measured effect.",
+                )]
+            )
+            claim = ledger.claims()[0]
+            context = build_synthesis_context(
+                ledger.claims(),
+                ledger.observations(),
+                critic_contested_claim_ids=[claim.claim_id],
+            )
+            fallback = build_fallback_report_payload(context, [])
+            report = render_report(fallback, context)
+
+        self.assertEqual(frozenset({claim.claim_id}), context.contested_claim_ids)
+        self.assertFalse(claim.disagreement_flag)
+        self.assertEqual(0, claim.supporting_domain_count)
+        self.assertEqual(1, claim.contradicting_domain_count)
+        self.assertEqual(claim.claim_id, fallback["contested_findings"][0]["claim_id"])
+        self.assertIn("## Contested Findings", report)
+
+    def test_critic_cannot_mark_support_only_claim_as_contested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            ledger.add_observations(
+                [EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://support.example/a",
+                    source_domain="support.example",
+                    statement="X improves Y.", polarity=Polarity.SUPPORT,
+                    excerpt="Measured effect.",
+                )]
+            )
+            claim = ledger.claims()[0]
+            context = build_synthesis_context(
+                ledger.claims(),
+                ledger.observations(),
+                critic_contested_claim_ids=[claim.claim_id],
+            )
+
+        self.assertEqual(frozenset(), context.contested_claim_ids)
+
     def test_synthesis_handles_empty_ledger_without_model_invention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")

@@ -39,7 +39,11 @@ def _critique_schema(max_followups: int) -> dict[str, Any]:
                     "additionalProperties": False,
                 },
             },
-            "contested_claim_ids": {"type": "array", "items": {"type": "string"}},
+            "contested_claim_ids": {
+                "type": "array",
+                "maxItems": 6,
+                "items": {"type": "string"},
+            },
             "remaining_gaps": {"type": "array", "items": {"type": "string"}},
             "followups": {
                 "type": "array",
@@ -172,7 +176,10 @@ class CriticSynthesizer:
             system_prompt=(
                 "You are Critic/Synthesizer, one of exactly three roles. Assess coverage and "
                 "visible disagreement. Emit at most two high-value follow-ups only when allowed. "
-                "Do not resolve contradictions silently."
+                "Do not resolve contradictions silently. contested_claim_ids may include a "
+                "contradiction-only proposition when its evidence directly challenges another "
+                "supported finding despite different wording. Select only genuine, query-relevant "
+                "disagreement; do not merge claims or infer additional support."
             ),
             user_prompt=json.dumps(
                 {
@@ -258,6 +265,12 @@ class CriticSynthesizer:
             for item in payload.get("contested_claim_ids", [])
             if str(item) in valid_claim_ids
         ]
+        if contested:
+            self.audit.log(
+                "critic.contestations_selected",
+                claim_ids=contested,
+                phase="initial" if allow_followups else "final",
+            )
         gaps = [str(item) for item in payload.get("remaining_gaps", [])]
         return Critique(
             coverage_by_task=coverage,
@@ -274,6 +287,7 @@ class CriticSynthesizer:
         claims: list[EvidenceClaim],
         observations: list[EvidenceObservation],
         remaining_gaps: list[str],
+        contested_claim_ids: list[str] | None = None,
     ) -> str:
         self.audit.log(
             "synthesis.started",
@@ -281,7 +295,11 @@ class CriticSynthesizer:
             observation_count=len(observations),
             budget=self.budget.snapshot(),
         )
-        context = build_synthesis_context(claims, observations)
+        context = build_synthesis_context(
+            claims,
+            observations,
+            critic_contested_claim_ids=contested_claim_ids,
+        )
         synthesis_gaps = contextualize_remaining_gaps(context, remaining_gaps)
         if not claims:
             payload: dict[str, object] = {
