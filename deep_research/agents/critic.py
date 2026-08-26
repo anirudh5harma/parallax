@@ -177,8 +177,9 @@ class CriticSynthesizer:
         allow_followups: bool,
     ) -> Critique:
         max_followups = self.budget.config.max_followup_tasks if allow_followups else 0
-        payload = self.model.generate_json(
-            system_prompt=(
+        try:
+            payload = self.model.generate_json(
+                system_prompt=(
                 "You are Critic/Synthesizer, one of exactly three roles. Assess coverage and "
                 "visible disagreement. Emit at most two high-value follow-ups only when allowed. "
                 "Do not resolve contradictions silently. contested_claim_ids may include a "
@@ -187,8 +188,8 @@ class CriticSynthesizer:
                 "disagreement; do not infer additional support. remaining_gaps must be plain "
                 "user-facing prose and must never contain claim IDs, "
                 "task IDs, source IDs, or other internal identifiers."
-            ),
-            user_prompt=json.dumps(
+                ),
+                user_prompt=json.dumps(
                 {
                     "original_query": original_query,
                     "tasks": [
@@ -217,16 +218,56 @@ class CriticSynthesizer:
                     "followups_allowed": allow_followups,
                 },
                 ensure_ascii=False,
-            ),
-            schema_name="initial_critique" if allow_followups else "final_critique",
-            schema=_critique_schema(max_followups),
-            timeout_seconds=self.budget.remaining_seconds(),
-        )
+                ),
+                schema_name="initial_critique" if allow_followups else "final_critique",
+                schema=_critique_schema(max_followups),
+                timeout_seconds=self.budget.remaining_seconds(),
+            )
+        except (ProviderError, BudgetExceeded) as exc:
+            contested = [
+                claim.claim_id for claim in claims if claim.disagreement_flag
+            ][:6]
+            covered_task_ids = {
+                task_id for claim in claims for task_id in claim.task_ids
+            }
+            gaps = [
+                f"Available evidence did not yield a supported finding for {task.question}"
+                for task in tasks
+                if task.id not in covered_task_ids
+            ][:6]
+            if not allow_followups:
+                gaps = [
+                    "Final coverage review was unavailable; unresolved gaps may remain.",
+                    *gaps,
+                ][:6]
+            self.audit.log(
+                "critic.fallback_used",
+                phase="initial" if allow_followups else "final",
+                reason=" ".join(str(exc).split())[:300],
+                contested_claim_ids=contested,
+            )
+            return Critique(
+                coverage_by_task={
+                    task.id: "Coverage preserved from collected evidence."
+                    for task in tasks
+                },
+                contested_claim_ids=contested,
+                remaining_gaps=gaps,
+                followup_tasks=[],
+            )
         raw_followups = payload.get("followups")
         if not isinstance(raw_followups, list) or len(raw_followups) > max_followups:
-            raise ValueError("critic exceeded follow-up limit")
+            self.audit.log(
+                "critic.output_rejected",
+                reason="invalid follow-up collection",
+            )
+            raw_followups = []
         if not allow_followups and raw_followups:
-            raise ValueError("final critic check cannot recurse")
+            self.audit.log(
+                "critic.output_rejected",
+                reason="final critic attempted recursion",
+            )
+            raw_followups = []
 
         tasks_by_id = {task.id: task for task in tasks}
         followups: list[ResearchTask] = []
@@ -234,7 +275,12 @@ class CriticSynthesizer:
             parent_id = str(item["parent_task_id"])
             parent = tasks_by_id.get(parent_id)
             if parent is None or parent.depth != 0 or parent.parent_task_id is not None:
-                raise ValueError("follow-up parent must be a primary task")
+                self.audit.log(
+                    "critic.followup_rejected",
+                    parent_task_id=parent_id,
+                    reason="follow-up parent must be a primary task",
+                )
+                continue
             try:
                 self.budget.reserve_followup_task(parent_depth=parent.depth)
             except BudgetExceeded as exc:
@@ -259,7 +305,11 @@ class CriticSynthesizer:
         coverage: dict[str, str] = {}
         raw_coverage = payload.get("coverage", [])
         if not isinstance(raw_coverage, list):
-            raise ValueError("critic coverage must be a list")
+            self.audit.log(
+                "critic.output_rejected",
+                reason="coverage must be a list",
+            )
+            raw_coverage = []
         for item in raw_coverage:
             task_id = str(item["task_id"])
             if task_id in tasks_by_id:

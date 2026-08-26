@@ -3,17 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deep_research.infrastructure.audit import JsonlAuditLogger
-from deep_research.infrastructure.providers import ProviderError
-from deep_research.domain.budget import BudgetConfig, BudgetManager
 from deep_research.agents.critic import CriticSynthesizer, _report_schema
-from deep_research.domain.ledger import EvidenceLedger
-from deep_research.domain.models import (
-    EvidenceObservation,
-    Polarity,
-    Priority,
-    ResearchTask,
-)
 from deep_research.agents.synthesizer import (
     CitationError,
     build_fallback_report_payload,
@@ -21,6 +11,16 @@ from deep_research.agents.synthesizer import (
     contextualize_remaining_gaps,
     render_report,
 )
+from deep_research.domain.budget import BudgetConfig, BudgetManager
+from deep_research.domain.ledger import EvidenceLedger
+from deep_research.domain.models import (
+    EvidenceObservation,
+    Polarity,
+    Priority,
+    ResearchTask,
+)
+from deep_research.infrastructure.audit import JsonlAuditLogger
+from deep_research.infrastructure.providers import ProviderError
 from tests.fakes import FakeModel
 
 
@@ -293,13 +293,43 @@ class CriticSynthesizerTests(unittest.TestCase):
             ledger.add_observations(observations)
             context = build_synthesis_context(ledger.claims(), ledger.observations())
             fallback = build_fallback_report_payload(context, [])
-            report = render_report(
+            render_report(
                 fallback,
                 context,
                 remaining_gaps=fallback["remaining_gaps"],
             )
 
         self.assertLess(len(fallback["contested_findings"]), 6)
+
+    def test_neutral_only_fallback_does_not_assert_the_proposition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            ledger.add_observations([
+                EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://neutral.example/a",
+                    source_domain="neutral.example",
+                    statement="Intervention X improves outcome Y.",
+                    polarity=Polarity.NEUTRAL,
+                    excerpt="The study did not evaluate effectiveness.",
+                )
+            ])
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            fallback = build_fallback_report_payload(context, [])
+            report = render_report(
+                fallback,
+                context,
+                remaining_gaps=fallback["remaining_gaps"],
+            )
+
+        self.assertIn(
+            "Evidence is insufficient to establish whether Intervention X improves outcome Y.",
+            report,
+        )
+        self.assertNotIn(
+            "## Executive Summary\n\nIntervention X improves outcome Y.",
+            report,
+        )
         self.assertLessEqual(len(report.split()), 1_800)
 
     def test_disputed_claim_cannot_render_as_main_finding(self) -> None:
@@ -368,6 +398,124 @@ class CriticSynthesizerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "non-disputed claims"):
                 render_report(payload, context)
+
+    def test_main_finding_cannot_cite_non_supporting_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            ledger.add_observations([
+                EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://support.example/a",
+                    source_domain="support.example", statement="X improves Y.",
+                    polarity=Polarity.SUPPORT, excerpt="Measured effect.",
+                ),
+                EvidenceObservation(
+                    observation_id="O2", task_id="T1",
+                    source_url="https://neutral.example/a",
+                    source_domain="neutral.example", statement="X improves Y.",
+                    polarity=Polarity.NEUTRAL, excerpt="The outcome was not evaluated.",
+                )
+            ])
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            claim = ledger.claims()[0]
+            payload = {
+                "executive_summary": "Ignored.",
+                "main_findings": [{
+                    "claim_id": claim.claim_id,
+                    "synthesis": "X improves Y.",
+                    "source_ids": ["S1"],
+                }],
+                "contested_findings": [], "weak_evidence": [], "remaining_gaps": [],
+            }
+
+            with self.assertRaisesRegex(CitationError, "do not support"):
+                render_report(payload, context)
+
+    def test_contested_finding_must_cite_both_available_polarities(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            ledger.add_observations([
+                EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://support.example/a",
+                    source_domain="support.example", statement="X improves Y.",
+                    polarity=Polarity.SUPPORT, excerpt="Measured effect.",
+                ),
+                EvidenceObservation(
+                    observation_id="O2", task_id="T1",
+                    source_url="https://contradict.example/a",
+                    source_domain="contradict.example", statement="X improves Y.",
+                    polarity=Polarity.CONTRADICT, excerpt="No measured effect.",
+                ),
+            ])
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            claim = ledger.claims()[0]
+            support_id = next(iter(context.supporting_sources_by_claim[claim.claim_id]))
+            payload = {
+                "executive_summary": "Ignored.", "main_findings": [],
+                "contested_findings": [{
+                    "claim_id": claim.claim_id,
+                    "synthesis": "Evidence disagrees.",
+                    "source_ids": [support_id],
+                }],
+                "weak_evidence": [], "remaining_gaps": [],
+            }
+
+            with self.assertRaisesRegex(CitationError, "contradicting evidence"):
+                render_report(payload, context)
+
+    def test_critic_provider_failure_preserves_collected_evidence(self) -> None:
+        def unavailable(_prompt: str) -> dict[str, object]:
+            raise ProviderError("temporary failure", code="bedrock_unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = Path(tmp) / "events.jsonl"
+            critic = CriticSynthesizer(
+                FakeModel({"initial_critique": unavailable}),
+                BudgetManager(BudgetConfig()),
+                JsonlAuditLogger(audit_path),
+            )
+            critique = critic.critique(
+                original_query="Query",
+                tasks=[task()],
+                claims=[],
+                allow_followups=True,
+            )
+
+        self.assertEqual([], critique.followup_tasks)
+        self.assertIn("Available evidence", critique.remaining_gaps[0])
+        self.assertIn("T1", critique.coverage_by_task)
+
+    def test_final_critic_failure_discloses_unavailable_coverage_review(self) -> None:
+        def unavailable(_prompt: str) -> dict[str, object]:
+            raise ProviderError("temporary failure", code="bedrock_unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations([
+                EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://support.example/a",
+                    source_domain="support.example", statement="X improves Y.",
+                    polarity=Polarity.SUPPORT, excerpt="Measured effect.",
+                )
+            ])
+            critique = CriticSynthesizer(
+                FakeModel({"final_critique": unavailable}),
+                BudgetManager(BudgetConfig()),
+                audit,
+            ).critique(
+                original_query="Query",
+                tasks=[task()],
+                claims=ledger.claims(),
+                allow_followups=False,
+            )
+
+        self.assertEqual(
+            "Final coverage review was unavailable; unresolved gaps may remain.",
+            critique.remaining_gaps[0],
+        )
 
     def test_critic_can_surface_contradiction_only_claim_without_merging_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -492,7 +640,7 @@ class CriticSynthesizerTests(unittest.TestCase):
             ]["description"],
         )
 
-    def test_report_rejects_output_over_word_ceiling(self) -> None:
+    def test_report_ignores_unbound_model_executive_summary(self) -> None:
         context = build_synthesis_context([], [])
         payload = {
             "executive_summary": "word " * 1_801,
@@ -502,8 +650,10 @@ class CriticSynthesizerTests(unittest.TestCase):
             "remaining_gaps": [],
         }
 
-        with self.assertRaisesRegex(ValueError, "word limit"):
-            render_report(payload, context)
+        report = render_report(payload, context)
+
+        self.assertNotIn("word word", report)
+        self.assertIn("Available evidence is insufficient", report)
 
     def test_critic_creates_at_most_two_depth_one_followups(self) -> None:
         model = FakeModel(
@@ -566,13 +716,43 @@ class CriticSynthesizerTests(unittest.TestCase):
                 BudgetManager(BudgetConfig()),
                 JsonlAuditLogger(Path(tmp) / "events.jsonl"),
             )
-            with self.assertRaises(ValueError):
-                critic.critique(
-                    original_query="Query",
-                    tasks=[task()],
-                    claims=[],
-                    allow_followups=False,
-                )
+            critique = critic.critique(
+                original_query="Query",
+                tasks=[task()],
+                claims=[],
+                allow_followups=False,
+            )
+
+        self.assertEqual([], critique.followup_tasks)
+
+    def test_critic_ignores_followup_with_invalid_parent(self) -> None:
+        model = FakeModel({
+            "initial_critique": {
+                "coverage": [],
+                "contested_claim_ids": [],
+                "remaining_gaps": [],
+                "followups": [{
+                    "parent_task_id": "missing",
+                    "question": "What evidence resolves the gap?",
+                    "rationale": "The gap is material.",
+                    "priority": "high",
+                    "page_budget_share": 0.1,
+                }],
+            }
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            critique = CriticSynthesizer(
+                model,
+                BudgetManager(BudgetConfig()),
+                JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+            ).critique(
+                original_query="Query",
+                tasks=[task()],
+                claims=[],
+                allow_followups=True,
+            )
+
+        self.assertEqual([], critique.followup_tasks)
 
     def test_synthesis_fallback_removes_unknown_source_id(self) -> None:
         model = FakeModel(

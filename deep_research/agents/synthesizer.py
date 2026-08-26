@@ -21,6 +21,8 @@ class SynthesisContext:
     source_urls: dict[str, str]
     claims_by_id: dict[str, EvidenceClaim]
     allowed_sources_by_claim: dict[str, set[str]]
+    supporting_sources_by_claim: dict[str, set[str]]
+    contradicting_sources_by_claim: dict[str, set[str]]
     contested_claim_ids: frozenset[str]
     omitted_contested_count: int
 
@@ -112,6 +114,8 @@ def build_synthesis_context(
     ranked = contested + balanced
     packet: list[dict[str, object]] = []
     allowed_sources_by_claim: dict[str, set[str]] = {}
+    supporting_sources_by_claim: dict[str, set[str]] = {}
+    contradicting_sources_by_claim: dict[str, set[str]] = {}
     for claim in ranked:
         support = [
             observations_by_id[item]
@@ -129,6 +133,12 @@ def build_synthesis_context(
             if item in observations_by_id
         ]
         all_observations = support + contradict + neutral
+        supporting_sources_by_claim[claim.claim_id] = {
+            url_to_id[observation.source_url] for observation in support
+        }
+        contradicting_sources_by_claim[claim.claim_id] = {
+            url_to_id[observation.source_url] for observation in contradict
+        }
         allowed_sources_by_claim[claim.claim_id] = {
             url_to_id[observation.source_url] for observation in all_observations
         }
@@ -179,6 +189,8 @@ def build_synthesis_context(
         source_urls=source_urls,
         claims_by_id={claim.claim_id: claim for claim in ranked},
         allowed_sources_by_claim=allowed_sources_by_claim,
+        supporting_sources_by_claim=supporting_sources_by_claim,
+        contradicting_sources_by_claim=contradicting_sources_by_claim,
         contested_claim_ids=frozenset(
             claim.claim_id for claim in contested
         ),
@@ -210,12 +222,18 @@ def repair_report_citations(
             valid_source_ids = set(source_ids) & allowed
             synthesis = str(item.get("synthesis", ""))
 
-            def replace_citation(match: re.Match[str]) -> str:
+            def replace_citation(
+                match: re.Match[str],
+                *,
+                allowed_sources: set[str] = allowed,
+                valid_sources: set[str] = valid_source_ids,
+                removed_sources: set[str] = removed,
+            ) -> str:
                 source_id = match.group(1)
-                if source_id in allowed:
-                    valid_source_ids.add(source_id)
+                if source_id in allowed_sources:
+                    valid_sources.add(source_id)
                     return match.group(0)
-                removed.add(source_id)
+                removed_sources.add(source_id)
                 return ""
 
             synthesis = re.sub(r"\[\s*(S\d+)\s*\]", replace_citation, synthesis)
@@ -252,7 +270,15 @@ def build_fallback_report_payload(
         if not allowed:
             continue
         source_ids: list[str] = []
-        for polarity in ("support", "contradiction", "neutral"):
+        if claim_id in context.contested_claim_ids:
+            polarities = ("support", "contradiction")
+        elif context.supporting_sources_by_claim[claim_id]:
+            polarities = ("support",)
+        elif context.contradicting_sources_by_claim[claim_id]:
+            polarities = ("contradiction",)
+        else:
+            polarities = ("neutral",)
+        for polarity in polarities:
             observations = packet_claim.get(polarity, [])
             if not isinstance(observations, list):
                 continue
@@ -265,12 +291,31 @@ def build_fallback_report_payload(
         if not source_ids:
             source_ids = sorted(allowed, key=lambda item: int(item[1:]))[:2]
         statement = _truncate_words(_display_claim_text(claim.text), 35)
+        contradiction_only = (
+            not context.supporting_sources_by_claim[claim_id]
+            and bool(context.contradicting_sources_by_claim[claim_id])
+        )
+        neutral_or_insufficient = (
+            claim.confidence_tag.value == "Insufficient"
+            or (
+                not context.supporting_sources_by_claim[claim_id]
+                and not context.contradicting_sources_by_claim[claim_id]
+            )
+        )
         finding = {
             "claim_id": claim_id,
             "synthesis": (
                 f"Sources disagree about this finding: {statement}"
                 if claim_id in context.contested_claim_ids
-                else statement
+                else (
+                    f"Available sources contradict this proposition: {statement}"
+                    if contradiction_only
+                    else (
+                        f"Evidence is insufficient to establish whether {statement}"
+                        if neutral_or_insufficient
+                        else statement
+                    )
+                )
             ),
             "source_ids": source_ids,
         }
@@ -353,23 +398,23 @@ def render_report(
 ) -> str:
     _validate_section_membership(payload, context)
     citation_payload = {
-        key: value for key, value in payload.items() if key != "remaining_gaps"
+        key: value
+        for key, value in payload.items()
+        if key not in {"executive_summary", "remaining_gaps"}
     }
     serialized = json.dumps(citation_payload, ensure_ascii=False)
     cited_in_text = _inline_source_ids(serialized)
     unknown = cited_in_text - set(context.source_urls)
     if unknown:
         raise CitationError(f"unknown source IDs: {sorted(unknown)}")
-    summary_citations = _inline_source_ids(str(payload.get("executive_summary", "")))
-    if summary_citations:
-        raise CitationError("executive summary cannot contain unscoped source IDs")
+    executive_summary = _bound_executive_summary(payload, context)
 
     sections: list[str] = [
         "# Research Report",
         "",
         "## Executive Summary",
         "",
-        str(payload.get("executive_summary", "No supported summary available.")),
+        executive_summary,
         "",
         "## Main Findings",
         "",
@@ -387,6 +432,7 @@ def render_report(
         payload.get("contested_findings", []),
         context,
         cited,
+        section="contested_findings",
     )
     sections.extend(["## Weak / Insufficient Evidence", ""])
     weak_items = payload.get("weak_evidence", [])
@@ -396,7 +442,12 @@ def render_report(
         for item in weak_items:
             if not isinstance(item, dict):
                 raise ValueError("weak evidence item must be an object")
-            claim = _validated_claim_item(item, context, cited)
+            claim = _validated_claim_item(
+                item,
+                context,
+                cited,
+                section="weak_evidence",
+            )
             sections.extend(
                 [
                     f"### {_display_claim_text(claim.text)}",
@@ -467,6 +518,20 @@ def _validate_section_membership(
     missing = disputed - section_ids["contested_findings"]
     if missing:
         raise ValueError(f"disputed claims missing from contested_findings: {sorted(missing)}")
+    if context.claims_by_id and not any(section_ids.values()):
+        raise ValueError("report omits every available evidence claim")
+    insufficient_main = {
+        claim_id
+        for claim_id in section_ids["main_findings"]
+        if (
+            claim_id in context.claims_by_id
+            and context.claims_by_id[claim_id].confidence_tag.value == "Insufficient"
+        )
+    }
+    if insufficient_main:
+        raise ValueError(
+            f"insufficient claims in main_findings: {sorted(insufficient_main)}"
+        )
 
 
 def _render_claim_findings(
@@ -474,6 +539,8 @@ def _render_claim_findings(
     raw_items: object,
     context: SynthesisContext,
     cited: set[str],
+    *,
+    section: str = "main_findings",
 ) -> None:
     if not isinstance(raw_items, list) or not raw_items:
         sections.extend(["None identified.", ""])
@@ -481,7 +548,7 @@ def _render_claim_findings(
     for item in raw_items:
         if not isinstance(item, dict):
             raise ValueError("finding must be an object")
-        claim = _validated_claim_item(item, context, cited)
+        claim = _validated_claim_item(item, context, cited, section=section)
         sections.extend(
             [
                 f"### {_display_claim_text(claim.text)}",
@@ -501,6 +568,8 @@ def _validated_claim_item(
     item: dict[str, object],
     context: SynthesisContext,
     cited: set[str],
+    *,
+    section: str = "main_findings",
 ) -> EvidenceClaim:
     claim_id = str(item.get("claim_id", ""))
     claim = context.claims_by_id.get(claim_id)
@@ -515,13 +584,59 @@ def _validated_claim_item(
     claim_source_ids = set(source_ids) | text_source_ids
     if not claim_source_ids:
         raise CitationError(f"claim finding has no citation: {claim_id}")
-    invalid = claim_source_ids - context.allowed_sources_by_claim[claim_id]
+    allowed = context.allowed_sources_by_claim[claim_id]
+    if section == "main_findings":
+        allowed = context.supporting_sources_by_claim[claim_id]
+    invalid = claim_source_ids - allowed
     if invalid:
         raise CitationError(
             f"source IDs do not support claim {claim_id}: {sorted(invalid)}"
         )
+    if section == "contested_findings":
+        supporting = context.supporting_sources_by_claim[claim_id]
+        contradicting = context.contradicting_sources_by_claim[claim_id]
+        if supporting and not claim_source_ids.intersection(supporting):
+            raise CitationError(
+                f"contested finding omits supporting evidence: {claim_id}"
+            )
+        if contradicting and not claim_source_ids.intersection(contradicting):
+            raise CitationError(
+                f"contested finding omits contradicting evidence: {claim_id}"
+            )
     cited.update(claim_source_ids)
     return claim
+
+
+def _bound_executive_summary(
+    payload: dict[str, object],
+    context: SynthesisContext,
+) -> str:
+    selected: list[tuple[str, dict[str, object]]] = []
+    for section, limit in (
+        ("main_findings", 2),
+        ("contested_findings", 1),
+        ("weak_evidence", 1),
+    ):
+        items = payload.get(section, [])
+        if isinstance(items, list):
+            selected.extend(
+                (section, item)
+                for item in items[:limit]
+                if isinstance(item, dict)
+            )
+    summaries: list[str] = []
+    for section, item in selected:
+        _validated_claim_item(item, context, set(), section=section)
+        synthesis = re.sub(r"\[\s*S\d+\s*\]", "", str(item.get("synthesis", "")))
+        cleaned = " ".join(synthesis.split())
+        if cleaned:
+            if section == "weak_evidence":
+                cleaned = f"Evidence is weak or insufficient: {cleaned}"
+            summaries.append(cleaned)
+    return _truncate_words(
+        " ".join(summaries),
+        200,
+    ) or "Available evidence is insufficient to support a reliable answer."
 
 
 def _claim_source_ids(item: dict[str, object]) -> list[str]:
