@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 
 from .models import EvidenceClaim, EvidenceObservation
@@ -97,6 +98,63 @@ def build_synthesis_context(
         claims_by_id={claim.claim_id: claim for claim in ranked},
         allowed_sources_by_claim=allowed_sources_by_claim,
     )
+
+
+def repair_report_citations(
+    payload: dict[str, object],
+    context: SynthesisContext,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    repaired = deepcopy(payload)
+    repairs: list[dict[str, object]] = []
+    for section in ("main_findings", "contested_findings", "weak_evidence"):
+        items = repaired.get(section, [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            claim_id = str(item.get("claim_id", ""))
+            allowed = context.allowed_sources_by_claim.get(claim_id)
+            source_ids = item.get("source_ids")
+            if allowed is None or not isinstance(source_ids, list) or any(
+                not isinstance(source_id, str) for source_id in source_ids
+            ):
+                continue
+            removed = set(source_ids) - allowed
+            valid_source_ids = set(source_ids) & allowed
+            synthesis = str(item.get("synthesis", ""))
+
+            def replace_citation(match: re.Match[str]) -> str:
+                source_id = re.search(r"S\d+", match.group(0))
+                if source_id and source_id.group(0) in allowed:
+                    valid_source_ids.add(source_id.group(0))
+                    return match.group(0)
+                if source_id:
+                    removed.add(source_id.group(0))
+                return ""
+
+            synthesis = re.sub(r"\[?\bS\d+\b\]?", replace_citation, synthesis)
+            synthesis = re.sub(r"\(\s*\)|\[\s*\]", "", synthesis)
+            item["synthesis"] = " ".join(synthesis.split())
+            fallback_added = False
+            if not valid_source_ids and allowed:
+                valid_source_ids.add(
+                    min(allowed, key=lambda source_id: int(source_id[1:]))
+                )
+                fallback_added = True
+            item["source_ids"] = sorted(
+                valid_source_ids,
+                key=lambda source_id: int(source_id[1:]),
+            )
+            if removed or fallback_added:
+                repairs.append(
+                    {
+                        "claim_id": claim_id,
+                        "removed_source_count": len(removed),
+                        "fallback_added": fallback_added,
+                    }
+                )
+    return repaired, repairs
 
 
 def render_report(

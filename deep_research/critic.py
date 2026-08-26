@@ -14,7 +14,11 @@ from .models import (
     ResearchTask,
 )
 from .providers import StructuredModel
-from .synthesizer import build_synthesis_context, render_report
+from .synthesizer import (
+    build_synthesis_context,
+    render_report,
+    repair_report_citations,
+)
 
 
 def _critique_schema(max_followups: int) -> dict[str, Any]:
@@ -322,6 +326,9 @@ class CriticSynthesizer:
             schema=schema,
             timeout_seconds=self.budget.remaining_seconds(),
         )
+        payload, citation_repairs = repair_report_citations(payload, context)
+        if citation_repairs:
+            self.audit.log("synthesis.citations_repaired", repairs=citation_repairs)
         try:
             report = render_report(payload, context, remaining_gaps=remaining_gaps)
         except ValueError as exc:
@@ -345,6 +352,9 @@ class CriticSynthesizer:
                 schema=schema,
                 timeout_seconds=self.budget.remaining_seconds(),
             )
+            payload, citation_repairs = repair_report_citations(payload, context)
+            if citation_repairs:
+                self.audit.log("synthesis.citations_repaired", repairs=citation_repairs)
             report = render_report(payload, context, remaining_gaps=remaining_gaps)
         self.audit.log(
             "synthesis.completed",
