@@ -2,7 +2,7 @@ import json
 import socket
 import unittest
 from email.message import Message
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from deep_research.pdf_extraction import PdfExtraction
 from deep_research.providers import (
@@ -286,6 +286,88 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
             extract.assert_not_called()
         finally:
             fetcher._pdf_slots.release()
+
+    def test_pdf_slot_wait_is_charged_to_fetch_deadline(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/pdf"
+        fetcher = HttpPageFetcher(max_pdf_parse_seconds=1)
+        fetcher._pdf_slots = Mock()
+        fetcher._pdf_slots.acquire.return_value = True
+        extraction = PdfExtraction("Useful evidence text.", "", 1)
+        with (
+            patch.object(
+                fetcher,
+                "_fetch_once",
+                return_value=(200, headers, b"%PDF-1.7"),
+            ),
+            patch(
+                "deep_research.providers.time.monotonic",
+                side_effect=[0, 0, 0.04, 0.07],
+            ),
+            patch(
+                "deep_research.providers.extract_pdf",
+                return_value=extraction,
+            ) as extract,
+        ):
+            fetcher.fetch("https://example.com/paper.pdf", timeout_seconds=0.1)
+
+        self.assertAlmostEqual(
+            0.03,
+            extract.call_args.kwargs["timeout_seconds"],
+            places=6,
+        )
+        fetcher._pdf_slots.release.assert_called_once()
+
+    def test_redirect_body_is_not_read_and_request_advertises_pdf(self) -> None:
+        headers = Message()
+        headers["Location"] = "https://example.com/final"
+        response = Mock(status=302, headers=headers)
+        connection = Mock()
+        connection.getresponse.return_value = response
+        fetcher = HttpPageFetcher()
+        with (
+            patch.object(
+                fetcher,
+                "_resolve_safe_target",
+                return_value=("example.com", 443, ["93.184.216.34"]),
+            ),
+            patch(
+                "deep_research.providers._PinnedHTTPSConnection",
+                return_value=connection,
+            ),
+        ):
+            status, _, raw = fetcher._fetch_once("https://example.com/start", 5)
+
+        self.assertEqual(302, status)
+        self.assertEqual(b"", raw)
+        response.read.assert_not_called()
+        request_headers = connection.request.call_args.kwargs["headers"]
+        self.assertIn("application/pdf", request_headers["Accept"])
+
+    def test_hinted_fake_pdf_reads_only_signature_prefix(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/pdf"
+        response = Mock(status=200, headers=headers)
+        response.read.return_value = b"not a PDF"
+        connection = Mock()
+        connection.getresponse.return_value = response
+        fetcher = HttpPageFetcher()
+        with (
+            patch.object(
+                fetcher,
+                "_resolve_safe_target",
+                return_value=("example.com", 443, ["93.184.216.34"]),
+            ),
+            patch(
+                "deep_research.providers._PinnedHTTPSConnection",
+                return_value=connection,
+            ),
+        ):
+            status, _, raw = fetcher._fetch_once("https://example.com/paper.pdf", 5)
+
+        self.assertEqual(200, status)
+        self.assertEqual(b"not a PDF", raw)
+        response.read.assert_called_once_with(1024)
 
     def test_redirect_preserves_server_required_trailing_slash(self) -> None:
         headers = Message()

@@ -481,14 +481,17 @@ class HttpPageFetcher:
             raise ProviderError(f"{kind} exceeds byte limit")
         if is_pdf:
             remaining = timeout_seconds - (time.monotonic() - started)
-            parse_timeout = min(self.max_pdf_parse_seconds, remaining)
-            if not self._pdf_slots.acquire(timeout=max(0, parse_timeout)):
+            slot_timeout = min(self.max_pdf_parse_seconds, remaining)
+            if not self._pdf_slots.acquire(timeout=max(0, slot_timeout)):
                 raise ProviderError("PDF extraction capacity unavailable")
             try:
+                remaining = timeout_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise ProviderError("fetch timed out")
                 try:
                     extraction = extract_pdf(
                         raw,
-                        timeout_seconds=parse_timeout,
+                        timeout_seconds=min(self.max_pdf_parse_seconds, remaining),
                         max_pages=self.max_pdf_pages,
                         max_chars=self.max_pdf_chars,
                     )
@@ -562,7 +565,10 @@ class HttpPageFetcher:
         headers = {
             "Host": host,
             "User-Agent": "TransparentResearch/0.1 (+research; contact=local)",
-            "Accept": "text/html,text/plain;q=0.9",
+            "Accept": (
+                "text/html,application/pdf;q=0.95,application/x-pdf;q=0.9,"
+                "text/plain;q=0.8"
+            ),
             "Accept-Encoding": "identity",
             "Connection": "close",
         }
@@ -588,7 +594,15 @@ class HttpPageFetcher:
             try:
                 connection.request("GET", path, headers=headers)
                 response = connection.getresponse()
+                if response.status in {301, 302, 303, 307, 308} or not (
+                    200 <= response.status < 300
+                ):
+                    return response.status, response.headers, b""
                 prefix = response.read(1024)
+                if self._is_pdf_hint(url, response.headers) and not self._looks_like_pdf(
+                    prefix
+                ):
+                    return response.status, response.headers, prefix
                 byte_limit = self._response_byte_limit(url, response.headers, prefix)
                 raw = prefix + response.read(max(0, byte_limit + 1 - len(prefix)))
                 return response.status, response.headers, raw
