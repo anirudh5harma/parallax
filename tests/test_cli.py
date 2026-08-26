@@ -17,12 +17,12 @@ class CliTests(unittest.TestCase):
     def test_serious_profile_has_documented_ceiling(self) -> None:
         args = build_parser().parse_args(["Query", "--profile", "serious"])
         config = config_from_args(args)
-        self.assertEqual(80, config.max_searches)
-        self.assertEqual(200, config.max_pages)
-        self.assertEqual(10, config.max_concurrent_fetches)
+        self.assertEqual(100, config.max_searches)
+        self.assertEqual(600, config.max_pages)
+        self.assertEqual(12, config.max_concurrent_fetches)
 
     def test_override_cannot_exceed_absolute_guard(self) -> None:
-        args = build_parser().parse_args(["Query", "--max-pages", "401"])
+        args = build_parser().parse_args(["Query", "--max-pages", "601"])
         with self.assertRaises(ValueError):
             config_from_args(args)
 

@@ -18,10 +18,10 @@ class WebCliTests(unittest.TestCase):
 
         config = run.call_args.args[0].state.sessions.config
         self.assertEqual(0, result)
-        self.assertEqual(80, config.max_searches)
-        self.assertEqual(200, config.max_pages)
-        self.assertEqual(10, config.max_concurrent_fetches)
-        self.assertEqual(900, config.wall_clock_timeout_seconds)
+        self.assertEqual(100, config.max_searches)
+        self.assertEqual(600, config.max_pages)
+        self.assertEqual(12, config.max_concurrent_fetches)
+        self.assertEqual(1800, config.wall_clock_timeout_seconds)
 
     def test_forwards_bounded_budget_controls(self) -> None:
         with patch("deep_research.web_cli.uvicorn.run") as run:
@@ -43,7 +43,7 @@ class WebCliTests(unittest.TestCase):
     def test_invalid_budget_never_starts_server(self) -> None:
         with patch("deep_research.web_cli.uvicorn.run") as run:
             with self.assertRaises(SystemExit):
-                main(["--max-pages", "401"])
+                main(["--max-pages", "601"])
 
         run.assert_not_called()
 

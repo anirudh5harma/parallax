@@ -9,7 +9,7 @@ MAX_PRIMARY_TASKS = 4
 MAX_FOLLOWUP_TASKS = 2
 MAX_RESEARCH_TASKS = 6
 MAX_SEARCHES = 150
-MAX_PAGES = 400
+MAX_PAGES = 600
 MAX_CONCURRENT_FETCHES = 12
 MAX_DEPTH = 1
 MAX_TIMEOUT_SECONDS = 1800.0
@@ -58,10 +58,10 @@ class BudgetConfig:
     @classmethod
     def serious(cls) -> "BudgetConfig":
         return cls(
-            max_searches=80,
-            max_pages=200,
-            max_concurrent_fetches=10,
-            wall_clock_timeout_seconds=900,
+            max_searches=100,
+            max_pages=600,
+            max_concurrent_fetches=12,
+            wall_clock_timeout_seconds=1800,
         )
 
 

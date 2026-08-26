@@ -23,27 +23,28 @@ from .providers import PageFetcher, ProviderError, SearchClient, StructuredModel
 from .urls import UrlRegistry, normalize_url
 
 
-QUERY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "queries": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 5,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "query_text": {"type": "string", "minLength": 3},
-                    "rationale": {"type": "string", "minLength": 3},
+def _query_schema(target: int, *, exact: bool) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "queries": {
+                "type": "array",
+                "minItems": target if exact else 1,
+                "maxItems": target,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "query_text": {"type": "string", "minLength": 3},
+                        "rationale": {"type": "string", "minLength": 3},
+                    },
+                    "required": ["query_text", "rationale"],
+                    "additionalProperties": False,
                 },
-                "required": ["query_text", "rationale"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["queries"],
-    "additionalProperties": False,
-}
+            }
+        },
+        "required": ["queries"],
+        "additionalProperties": False,
+    }
 
 EVIDENCE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -135,7 +136,7 @@ class Researcher:
         audit: JsonlAuditLogger,
         urls: UrlRegistry,
         fetch_gate: FetchGate,
-        results_per_search: int = 12,
+        results_per_search: int = 15,
     ) -> None:
         self.model = model
         self.search = search
@@ -157,13 +158,19 @@ class Researcher:
         errors: list[str] = []
         explorations: list[PageExploration] = []
         observations: list[EvidenceObservation] = []
-        queries = self._generate_queries(task, cancellation)
         page_cap = max(1, math.ceil(self.budget.config.max_pages * task.page_budget_share))
-        candidates: list[str] = []
+        query_target = min(
+            15,
+            max(3, math.ceil(page_cap / self.results_per_search * 1.5)),
+        )
+        queries = self._generate_queries(task, cancellation, target=query_target)
+        new_candidates: list[str] = []
+        reused_candidates: list[str] = []
+        reuse_cap = max(4, math.ceil(page_cap * 0.1))
         candidate_norms: set[str] = set()
         for query in queries:
             self._raise_if_cancelled(cancellation)
-            if len(candidates) >= page_cap:
+            if len(new_candidates) >= page_cap:
                 break
             try:
                 self.budget.reserve_search()
@@ -189,7 +196,7 @@ class Researcher:
                 self.audit.log("search.failed", task_id=task.id, error=str(exc))
                 continue
             for result in results:
-                if len(candidates) >= page_cap:
+                if len(new_candidates) >= page_cap:
                     break
                 self._raise_if_cancelled(cancellation)
                 try:
@@ -215,7 +222,12 @@ class Researcher:
                         url=result.url,
                         normalized_url=normalized,
                     )
-                candidates.append(result.url)
+                    if len(reused_candidates) < reuse_cap:
+                        reused_candidates.append(result.url)
+                    continue
+                new_candidates.append(result.url)
+
+        candidates = new_candidates + reused_candidates
 
         executor = ThreadPoolExecutor(max_workers=self.budget.config.max_concurrent_fetches)
         futures: list[Future[tuple[PageExploration, list[EvidenceObservation], str | None]]] = [
@@ -250,30 +262,46 @@ class Researcher:
         self,
         task: ResearchTask,
         cancellation: threading.Event,
+        *,
+        target: int,
     ) -> list[SearchQuery]:
+        exact = self.budget.config.max_pages >= 500
+        quantity = f"exactly {target}" if exact else f"up to {target}"
         payload = self.model.generate_json(
             system_prompt=(
-                "You are Researcher, one of exactly three roles. Generate up to five focused "
-                "search queries that cover distinct source types and viewpoints. Do not answer "
-                "the question."
+                f"You are Researcher, one of exactly three roles. Generate {quantity} "
+                "focused, non-duplicate search queries. Diversify across primary studies, "
+                "official sources, academic methods, recent evidence, regional variants, "
+                "alternative terminology, and critical or contradicting evidence. Each query "
+                "must cover a materially different search angle. Do not answer the question."
             ),
             user_prompt=f"Question: {task.question}\nRationale: {task.rationale}",
             schema_name="search_queries",
-            schema=QUERY_SCHEMA,
+            schema=_query_schema(target, exact=exact),
             timeout_seconds=self.budget.remaining_seconds(),
         )
         self._raise_if_cancelled(cancellation)
         raw_queries = payload.get("queries")
-        if not isinstance(raw_queries, list) or not 1 <= len(raw_queries) <= 5:
-            raise ValueError("researcher must return 1-5 search queries")
-        queries = [
-            SearchQuery(
+        valid_count = len(raw_queries) == target if exact and isinstance(raw_queries, list) else (
+            isinstance(raw_queries, list) and 1 <= len(raw_queries) <= target
+        )
+        if not valid_count:
+            requirement = f"exactly {target}" if exact else f"1-{target}"
+            raise ValueError(f"researcher must return {requirement} search queries")
+        queries: list[SearchQuery] = []
+        seen_query_text: set[str] = set()
+        for item in raw_queries:
+            query = SearchQuery(
                 task_id=task.id,
                 query_text=str(item["query_text"]),
                 rationale=str(item["rationale"]),
             )
-            for item in raw_queries
-        ]
+            normalized_text = " ".join(query.query_text.casefold().split())
+            if normalized_text in seen_query_text:
+                self.audit.log("researcher.query_skipped_duplicate", query=query)
+                continue
+            seen_query_text.add(normalized_text)
+            queries.append(query)
         for query in queries:
             self.audit.log("researcher.query_generated", query=query)
         return queries

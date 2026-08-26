@@ -85,7 +85,7 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
-    def test_accepts_five_queries_for_broad_runs(self) -> None:
+    def test_serious_run_generates_fifteen_queries_per_primary_task(self) -> None:
         model = FakeModel(
             {
                 "search_queries": {
@@ -94,14 +94,14 @@ class ResearcherTests(unittest.TestCase):
                             "query_text": f"distinct query {index}",
                             "rationale": "broader source coverage",
                         }
-                        for index in range(5)
+                        for index in range(15)
                     ]
                 },
                 "page_evidence": {"observations": []},
             }
         )
         with tempfile.TemporaryDirectory() as tmp:
-            budget = BudgetManager(BudgetConfig(max_searches=5))
+            budget = BudgetManager(BudgetConfig.serious())
             researcher = Researcher(
                 model=model,
                 search=FakeSearch([]),
@@ -117,11 +117,46 @@ class ResearcherTests(unittest.TestCase):
                     question="What does broad evidence show?",
                     rationale="Cover distinct evidence paths",
                     priority=Priority.HIGH,
+                    page_budget_share=0.25,
+                )
+            )
+
+        self.assertEqual(15, budget.snapshot().searches)
+
+    def test_skips_duplicate_search_queries(self) -> None:
+        model = FakeModel(
+            {
+                "search_queries": {
+                    "queries": [
+                        {"query_text": "same query", "rationale": "one angle"},
+                        {"query_text": " SAME   QUERY ", "rationale": "duplicate angle"},
+                    ]
+                },
+                "page_evidence": {"observations": []},
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig()),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            )
+            result = researcher.research(
+                ResearchTask(
+                    id="T1",
+                    question="What does the evidence show?",
+                    rationale="Cover distinct evidence paths",
+                    priority=Priority.HIGH,
                     page_budget_share=1,
                 )
             )
 
-        self.assertEqual(5, budget.snapshot().searches)
+        self.assertEqual([], result.errors)
+        self.assertEqual(1, researcher.budget.snapshot().searches)
 
     def test_page_content_is_delimited_as_untrusted_data(self) -> None:
         prompts: list[str] = []

@@ -22,7 +22,7 @@ deep-research-api
 cd frontend && npm install && npm run dev
 ```
 
-Open `http://localhost:3000`. Web research defaults to Opus 4.6 through Bedrock and the serious breadth profile: up to 80 searches, 200 pages, 10 concurrent fetches, and 15 minutes. Sessions stay in memory and support new research paths from contradicting citations.
+Open `http://localhost:3000`. Web research defaults to Sonnet 4.6 through Bedrock and the serious profile: up to 100 searches, 600 pages, 12 concurrent fetches, and 30 minutes. Sessions stay in memory and support new research paths from contradicting citations.
 
 For deployment, use `frontend/` as the Vercel root and the repository root as a Render Blueprint. Set `NEXT_PUBLIC_RESEARCH_API_URL` on Vercel. Keep Bedrock and Tavily keys on Render, then set `WEB_ALLOWED_ORIGINS` and `WEB_ALLOWED_HOSTS` to explicit production values. Anonymous workspaces have in-memory daily quotas; add platform IP rate limits before public launch.
 
@@ -32,7 +32,7 @@ Default `dev` budget: 4 primary tasks, 2 follow-ups, 24 searches, 40 pages, 8 co
 python -m deep_research "Your question" --profile serious
 ```
 
-`serious` allows 80 searches, 200 pages, 10 concurrent fetches, and 15 minutes. CLI overrides remain bounded by absolute guards.
+`serious` allows 100 searches, 600 pages, 12 concurrent fetches, and 30 minutes. CLI overrides remain bounded by absolute guards.
 
 ## Architecture
 
