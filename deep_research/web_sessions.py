@@ -742,6 +742,7 @@ def _public_audit_event(record: dict[str, Any]) -> dict[str, Any] | None:
         "planner.plan_created": "Planner created four focused research questions",
         "researcher.query_generated": "Researcher prepared a focused search",
         "search.executed": "Search batch returned; ranking unique sources",
+        "source.discovered": "A distinct source entered the screening set",
         "page.explored": "A source was compressed into structured evidence",
         "page.fetch_failed": "A source could not be opened; continuing with other results",
         "observation.extracted": "Evidence observation added to the ledger",
@@ -758,12 +759,19 @@ def _public_audit_event(record: dict[str, Any]) -> dict[str, Any] | None:
         "message": message,
         "task_id": data.get("task_id"),
     }
-    if event == "page.explored":
-        exploration = data.get("exploration")
-        domain = exploration.get("domain") if isinstance(exploration, dict) else None
+    if event in {"source.discovered", "page.explored"}:
+        if event == "page.explored":
+            exploration = data.get("exploration")
+            domain = exploration.get("domain") if isinstance(exploration, dict) else None
+        else:
+            domain = data.get("source_domain")
         if isinstance(domain, str) and re.fullmatch(
             r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", domain
         ):
             public["source_domain"] = domain
-            public["message"] = f"Reading evidence from {domain}"
+            public["message"] = (
+                f"Reading evidence from {domain}"
+                if event == "page.explored"
+                else f"Screening {domain}"
+            )
     return public

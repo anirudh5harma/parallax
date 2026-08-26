@@ -8,7 +8,7 @@ from deep_research.audit import JsonlAuditLogger
 from deep_research.budget import BudgetConfig, BudgetManager
 from deep_research.models import Priority, ResearchTask, SearchResult
 from deep_research.planner import InvalidResearchQuery, Planner
-from deep_research.researcher import FetchGate, Researcher
+from deep_research.researcher import FetchGate, Researcher, _Candidate, _select_candidates
 from deep_research.urls import UrlRegistry
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
@@ -152,6 +152,34 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_candidate_selection_prefers_primary_and_diverse_domains(self) -> None:
+        candidates = [
+            _Candidate(
+                result=SearchResult(f"https://blog.example/{index}", "Opinion", "short"),
+                normalized_url=f"https://blog.example/{index}",
+                domain="blog.example",
+                discovery_order=index,
+            )
+            for index in range(5)
+        ]
+        candidates.append(
+            _Candidate(
+                result=SearchResult(
+                    "https://agency.gov/research/report.pdf",
+                    "Annual research report",
+                    "Detailed official evidence " * 20,
+                ),
+                normalized_url="https://agency.gov/research/report.pdf",
+                domain="agency.gov",
+                discovery_order=5,
+            )
+        )
+
+        selected = _select_candidates(candidates, 4)
+
+        self.assertEqual("agency.gov", selected[0].domain)
+        self.assertEqual(3, sum(item.domain == "blog.example" for item in selected))
+
     def test_search_generation_retries_when_current_anchor_is_missing(self) -> None:
         calls = 0
 

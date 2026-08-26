@@ -5,7 +5,9 @@ import json
 import math
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from .audit import JsonlAuditLogger
 from .budget import BudgetExceeded, BudgetManager
@@ -16,12 +18,82 @@ from .models import (
     Polarity,
     ResearchResult,
     ResearchTask,
+    SearchResult,
     SearchQuery,
     TaskStatus,
 )
 from .providers import PageFetcher, ProviderError, SearchClient, StructuredModel
 from .time_context import current_utc_date, has_current_anchor, requires_current_evidence
 from .urls import UrlRegistry, normalize_url
+
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    result: SearchResult
+    normalized_url: str
+    domain: str
+    discovery_order: int
+
+
+def _source_quality(candidate: _Candidate) -> int:
+    """Small deterministic preference for primary, research, and report-like sources."""
+    domain = candidate.domain.casefold()
+    path = urlsplit(candidate.normalized_url).path.casefold()
+    title = candidate.result.title.casefold()
+    score = 0
+    if domain.endswith((".gov", ".edu", ".int")):
+        score += 6
+    if any(
+        cue in path
+        for cue in (
+            "/annual-report",
+            "/filing",
+            "/investor",
+            "/publication",
+            "/research",
+            "/report",
+        )
+    ) or path.endswith(".pdf"):
+        score += 3
+    if any(
+        cue in title
+        for cue in ("annual report", "earnings", "filing", "study", "research", "report")
+    ):
+        score += 2
+    if len(candidate.result.snippet.strip()) >= 180:
+        score += 1
+    if domain in {
+        "facebook.com",
+        "instagram.com",
+        "pinterest.com",
+        "reddit.com",
+        "tiktok.com",
+        "x.com",
+        "youtube.com",
+    }:
+        score -= 8
+    return score
+
+
+def _select_candidates(candidates: list[_Candidate], limit: int) -> list[_Candidate]:
+    """Prefer stronger results while keeping the initial read set domain-diverse."""
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: (-_source_quality(candidate), candidate.discovery_order),
+    )
+    selected: list[_Candidate] = []
+    deferred: list[_Candidate] = []
+    domain_counts: dict[str, int] = {}
+    for candidate in ranked:
+        if domain_counts.get(candidate.domain, 0) >= 3:
+            deferred.append(candidate)
+            continue
+        selected.append(candidate)
+        domain_counts[candidate.domain] = domain_counts.get(candidate.domain, 0) + 1
+        if len(selected) == limit:
+            return selected
+    selected.extend(deferred[: max(0, limit - len(selected))])
+    return selected
 
 
 def _query_schema(target: int, *, exact: bool) -> dict[str, Any]:
@@ -177,14 +249,12 @@ class Researcher:
             max(3, math.ceil(page_cap / self.results_per_search * 1.5)),
         )
         queries = self._generate_queries(task, cancellation, target=query_target)
-        new_candidates: list[str] = []
-        reused_candidates: list[str] = []
+        new_candidates: list[_Candidate] = []
+        reused_candidates: list[_Candidate] = []
         reuse_cap = max(4, math.ceil(page_cap * 0.1))
         candidate_norms: set[str] = set()
         for query in queries:
             self._raise_if_cancelled(cancellation)
-            if len(new_candidates) >= page_cap:
-                break
             try:
                 self.budget.reserve_search()
                 results = self.search.search(
@@ -209,8 +279,6 @@ class Researcher:
                 self.audit.log("search.failed", task_id=task.id, error=str(exc))
                 continue
             for result in results:
-                if len(new_candidates) >= page_cap:
-                    break
                 self._raise_if_cancelled(cancellation)
                 try:
                     claimed, normalized = self.urls.claim_url(result.url)
@@ -228,6 +296,13 @@ class Researcher:
                     )
                     continue
                 candidate_norms.add(normalized)
+                domain = urlsplit(normalized).netloc
+                candidate = _Candidate(
+                    result=result,
+                    normalized_url=normalized,
+                    domain=domain,
+                    discovery_order=len(new_candidates) + len(reused_candidates),
+                )
                 if not claimed:
                     self.audit.log(
                         "page.reused_duplicate",
@@ -236,11 +311,22 @@ class Researcher:
                         normalized_url=normalized,
                     )
                     if len(reused_candidates) < reuse_cap:
-                        reused_candidates.append(result.url)
+                        reused_candidates.append(candidate)
                     continue
-                new_candidates.append(result.url)
+                new_candidates.append(candidate)
+                self.audit.log(
+                    "source.discovered",
+                    task_id=task.id,
+                    source_domain=domain,
+                )
 
-        candidates = new_candidates + reused_candidates
+        fetch_cap = min(page_cap, 30) if self.budget.config.max_pages >= 500 else page_cap
+        selected = _select_candidates(new_candidates, fetch_cap)
+        if len(selected) < fetch_cap:
+            selected.extend(
+                _select_candidates(reused_candidates, fetch_cap - len(selected))
+            )
+        candidates = [candidate.result.url for candidate in selected]
 
         executor = ThreadPoolExecutor(max_workers=self.budget.config.max_concurrent_fetches)
         futures: list[Future[tuple[PageExploration, list[EvidenceObservation], str | None]]] = [
@@ -291,7 +377,9 @@ class Researcher:
             "variation, outcomes, mechanisms, implementation, alternative terminology, critical "
             "evidence, and direct contradictions. Treat the supplied current date as "
             "authoritative. For time-sensitive questions, include searches covering the "
-            "current year and verify freshness from web sources. Do not answer the question."
+            "current year and verify freshness from web sources. For serious runs, make at "
+            "least four queries explicitly target primary sources, official data, filings, or "
+            "research publications. Do not answer the question."
         )
         user_prompt = (
             f"Question: {task.question}\n"

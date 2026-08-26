@@ -391,6 +391,20 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertNotIn("private-path", str(event))
         self.assertNotIn("secret-hash", str(event))
 
+    def test_discovery_progress_exposes_domain_without_url(self) -> None:
+        event = _public_audit_event(
+            {
+                "event": "source.discovered",
+                "data": {
+                    "source_domain": "agency.gov",
+                    "url": "https://agency.gov/private-path",
+                },
+            }
+        )
+
+        self.assertEqual("agency.gov", event["source_domain"])
+        self.assertNotIn("private-path", str(event))
+
     def test_fetch_failures_expose_only_generic_progress(self) -> None:
         event = _public_audit_event(
             {
