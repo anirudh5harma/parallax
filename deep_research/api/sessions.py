@@ -31,6 +31,7 @@ MAX_SSE_CONNECTIONS = 8
 MAX_SSE_CONNECTIONS_PER_CLIENT = 2
 SESSION_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 RESEARCH_MODES = {"fast", "deep"}
+MAX_BRANCH_SEED_OBSERVATIONS = 100
 
 
 class SessionCapacityError(RuntimeError):
@@ -39,6 +40,45 @@ class SessionCapacityError(RuntimeError):
 
 class SessionLaunchError(RuntimeError):
     pass
+
+
+def _branch_seed_observations(
+    observations: list[dict[str, Any]], selected_observation_id: str
+) -> list[dict[str, Any]]:
+    selected = next(
+        (
+            item
+            for item in observations
+            if isinstance(item, dict)
+            and str(item.get("observation_id")) == selected_observation_id
+        ),
+        None,
+    )
+    remaining = sorted(
+        (
+            item
+            for item in observations
+            if item is not selected and isinstance(item, dict)
+        ),
+        key=lambda item: str(item.get("observation_id", "")),
+    )
+    chosen = [selected] if selected is not None else []
+    seen_domains = {str(selected.get("source_domain", ""))} if selected else set()
+    for item in remaining:
+        domain = str(item.get("source_domain", ""))
+        if domain in seen_domains:
+            continue
+        chosen.append(item)
+        seen_domains.add(domain)
+        if len(chosen) == MAX_BRANCH_SEED_OBSERVATIONS:
+            return chosen
+    chosen_ids = {id(item) for item in chosen}
+    chosen.extend(
+        item
+        for item in remaining
+        if id(item) not in chosen_ids
+    )
+    return chosen[:MAX_BRANCH_SEED_OBSERVATIONS]
 
 
 @dataclass(slots=True)
@@ -519,6 +559,9 @@ class ResearchSessionService:
                 "source_url": str(selected["source_url"]),
                 "claim_text": str(selected_claim["text"]),
             }
+            seed_items = _branch_seed_observations(
+                selected_claim["observations"], str(selected["observation_id"])
+            )
             seed_observations = [
                 {
                     "observation_id": str(item["observation_id"]),
@@ -530,7 +573,7 @@ class ResearchSessionService:
                     "excerpt": str(item["excerpt"]),
                     "source_type": item.get("source_type"),
                 }
-                for item in selected_claim["observations"]
+                for item in seed_items
                 if isinstance(item, dict)
             ]
             safe_claim = _branch_text(selected_claim["text"], 180)

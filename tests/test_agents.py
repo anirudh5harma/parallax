@@ -9,7 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from deep_research.agents.planner import InvalidResearchQuery, Planner
-from deep_research.agents.researcher import FetchGate, Researcher, _Candidate, _select_candidates
+from deep_research.agents.researcher import (
+    EVIDENCE_SEMANTIC_RULES,
+    FetchGate,
+    Researcher,
+    _Candidate,
+    _select_candidates,
+    _task_capacity,
+)
 from deep_research.domain.budget import BudgetConfig, BudgetExceeded, BudgetManager
 from deep_research.domain.models import (
     FetchedPage,
@@ -163,6 +170,16 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_batch_and_single_extraction_share_polarity_rules(self) -> None:
+        self.assertIn("source-independent proposition", EVIDENCE_SEMANTIC_RULES)
+        self.assertIn("proposition being contradicted", EVIDENCE_SEMANTIC_RULES)
+        self.assertIn("supports or contradicts that proposition", EVIDENCE_SEMANTIC_RULES)
+
+    def test_primary_task_caps_preserve_followup_page_reserve(self) -> None:
+        primary_pool = BudgetConfig.fast().max_pages - BudgetConfig.fast().followup_page_reserve
+
+        self.assertLessEqual(_task_capacity(primary_pool, 0.25) * 4, primary_pool)
+
     def test_batched_evidence_preserves_page_attribution_and_literal_excerpts(self) -> None:
         def batch_evidence(prompt: str) -> dict[str, object]:
             supplied = json.loads(prompt)["untrusted_pages"]
@@ -223,6 +240,66 @@ class ResearcherTests(unittest.TestCase):
         self.assertEqual(["source0.example", "source1.example"], [
             item.observations[0].source_domain for item in outcomes
         ])
+
+    def test_batch_failure_falls_back_to_single_page_extraction(self) -> None:
+        def fail_batch(_prompt: str) -> dict[str, object]:
+            raise ValueError("invalid batch response")
+
+        def page_evidence(prompt: str) -> dict[str, object]:
+            page = json.loads(prompt)["untrusted_page"]
+            return {
+                "observations": [{
+                    "statement": f"Finding from {page['url']}",
+                    "claim_frame_id": "NOVEL",
+                    "polarity": "support",
+                    "excerpt": "Direct evidence.",
+                    "source_type": "paper",
+                }]
+            }
+
+        model = FakeModel({
+            "batch_page_evidence": fail_batch,
+            "page_evidence": page_evidence,
+        })
+        pages = [
+            FetchedPage(
+                url=f"https://source{index}.example/report",
+                normalized_url=f"https://source{index}.example/report",
+                domain=f"source{index}.example",
+                title="Source",
+                text="Direct evidence.",
+                content_hash=str(index),
+            )
+            for index in range(2)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig(max_pages=2)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+                evidence_batch_size=2,
+            )
+            outcomes = researcher._process_fetched_pages(
+                ResearchTask(
+                    id="T1",
+                    question="What does the evidence show?",
+                    rationale="Test fallback",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                ),
+                pages,
+                threading.Event(),
+            )
+
+        self.assertEqual(
+            ["batch_page_evidence", "page_evidence", "page_evidence"],
+            model.calls,
+        )
+        self.assertEqual(["success", "success"], [item.status for item in outcomes])
 
     def test_batched_evidence_rejects_excerpt_from_another_page(self) -> None:
         model = FakeModel({

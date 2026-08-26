@@ -17,6 +17,14 @@ WORKSPACE_B = "b" * 32
 
 
 class LocalApiBoundaryTests(unittest.TestCase):
+    def test_default_app_factory_keeps_distinct_mode_profiles(self) -> None:
+        app = create_app()
+
+        self.assertEqual(600, app.state.sessions.configs["fast"].max_sources)
+        self.assertEqual(220, app.state.sessions.configs["fast"].max_pages)
+        self.assertEqual(800, app.state.sessions.configs["deep"].max_sources)
+        self.assertEqual(400, app.state.sessions.configs["deep"].max_pages)
+
     def test_session_creation_accepts_research_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             "os.environ",

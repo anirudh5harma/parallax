@@ -15,7 +15,6 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from ..domain.budget import BudgetConfig
 from .sessions import (
     STREAM_END_STATUSES,
     ResearchSessionService,
@@ -122,10 +121,7 @@ class BranchRequest(BaseModel):
 
 
 def create_app(service: ResearchSessionService | None = None) -> FastAPI:
-    sessions = service or ResearchSessionService(
-        output_root=Path("runs/web"),
-        config=BudgetConfig.serious(),
-    )
+    sessions = service or ResearchSessionService(output_root=Path("runs/web"))
     quota = AnonymousWorkspaceQuota()
     allowed_origins = _environment_set("WEB_ALLOWED_ORIGINS", DEFAULT_ORIGINS)
     allowed_hosts = _environment_set("WEB_ALLOWED_HOSTS", DEFAULT_HOSTS)

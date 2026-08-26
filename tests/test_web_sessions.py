@@ -470,6 +470,33 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertIn("independent corroboration", child.query)
         self.assertIn("Do not assume", child.query)
 
+    def test_branch_seed_is_bounded_and_keeps_selected_contradiction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            parent = service.create("Does intervention X improve outcome Y?")
+            parent.status = "completed"
+            parent.ledger = ledger()
+            for index in range(3, 108):
+                observation_id = f"O{index}"
+                parent.ledger["claims"][0]["supporting_observations"].append(
+                    observation_id
+                )
+                parent.ledger["observations"].append(
+                    {
+                        "observation_id": observation_id,
+                        "source_url": f"https://source{index}.example/report",
+                        "source_domain": f"source{index}.example",
+                        "statement": "Intervention X improves outcome Y.",
+                        "polarity": "support",
+                        "excerpt": "A measurable improvement was observed.",
+                    }
+                )
+
+            child = service.create_branch(parent.id, "O2")
+
+        self.assertEqual(100, len(child.seed_observations))
+        self.assertEqual("O2", child.seed_observations[0]["observation_id"])
+
     def test_branch_prompt_stays_inside_query_ceiling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(output_root=Path(tmp), auto_start=False)

@@ -38,6 +38,13 @@ from ..infrastructure.providers import (
     StructuredModel,
 )
 
+EVIDENCE_SEMANTIC_RULES = (
+    "Write every statement as a source-independent proposition with all material population, "
+    "timeframe, outcome, direction, and modality qualifiers. For contradicting evidence, state "
+    "the proposition being contradicted rather than rewriting the source's opposing conclusion "
+    "as a new claim. Polarity says whether the page supports or contradicts that proposition. "
+)
+
 
 @dataclass(frozen=True, slots=True)
 class _Candidate:
@@ -144,6 +151,11 @@ def _select_candidates(candidates: list[_Candidate], limit: int) -> list[_Candid
     if len(selected) < limit:
         add_tier([candidate for candidate in ranked if _source_quality(candidate) <= -8])
     return selected
+
+
+def _task_capacity(pool: int, share: float) -> int:
+    """Allocate without letting rounded task caps exceed their shared pool."""
+    return max(1, math.floor(pool * share))
 
 
 def _query_schema(target: int, *, exact: bool) -> dict[str, Any]:
@@ -412,8 +424,8 @@ class Researcher:
         else:
             page_pool = self.budget.config.max_pages
             source_pool = self.budget.config.max_sources
-        page_cap = max(1, math.ceil(page_pool * task.page_budget_share))
-        source_cap = max(page_cap, math.ceil(source_pool * task.page_budget_share))
+        page_cap = _task_capacity(page_pool, task.page_budget_share)
+        source_cap = max(page_cap, _task_capacity(source_pool, task.page_budget_share))
         if task.depth == 1:
             page_cap = min(page_cap, self.budget.remaining_pages())
             source_cap = min(source_cap, self.budget.remaining_sources())
@@ -957,7 +969,7 @@ class Researcher:
                 [page for page, _exploration in eligible],
                 cancellation,
             )
-        except (ProviderError, ValueError, BudgetExceeded) as exc:
+        except BudgetExceeded as exc:
             for _page, exploration in eligible:
                 self.audit.log(
                     "observation.extraction_failed",
@@ -965,6 +977,39 @@ class Researcher:
                     error=str(exc),
                 )
                 outcomes.append(_PageOutcome(exploration, [], "failed", exc))
+            return outcomes
+        except (ProviderError, ValueError) as exc:
+            if isinstance(exc, ProviderError) and not exc.retryable:
+                for _page, exploration in eligible:
+                    self.audit.log(
+                        "observation.extraction_failed",
+                        exploration=exploration,
+                        error=str(exc),
+                    )
+                    outcomes.append(_PageOutcome(exploration, [], "failed", exc))
+                return outcomes
+            self.audit.log(
+                "observation.batch_fallback",
+                task_id=task.id,
+                page_count=len(eligible),
+                error=str(exc),
+            )
+            for page, exploration in eligible:
+                try:
+                    observations = self._extract_observations(task, page, cancellation)
+                except (ProviderError, ValueError, BudgetExceeded) as page_exc:
+                    self.audit.log(
+                        "observation.extraction_failed",
+                        exploration=exploration,
+                        error=str(page_exc),
+                    )
+                    outcomes.append(
+                        _PageOutcome(exploration, [], "failed", page_exc)
+                    )
+                else:
+                    outcomes.append(
+                        _PageOutcome(exploration, observations, "success")
+                    )
             return outcomes
         for page, exploration in eligible:
             outcomes.append(
@@ -1012,11 +1057,8 @@ class Researcher:
         payload = self._generate_json(
             system_prompt=(
                 "You are Researcher, one of exactly three roles. Extract only atomic, "
-                "falsifiable, on-topic observations. Write statement as a source-independent "
-                "proposition with all material population, timeframe, and outcome qualifiers. "
-                "For contradicting evidence, state the proposition being contradicted rather "
-                "than rewriting the source's opposing conclusion as a new claim. Polarity says "
-                "whether this page supports or contradicts that proposition. Every excerpt "
+                "falsifiable, on-topic observations. "
+                f"{EVIDENCE_SEMANTIC_RULES}Every excerpt "
                 "must be one short, continuous, verbatim substring copied from the supplied "
                 "page text, with identical words and punctuation; never paraphrase, splice, "
                 "or insert ellipses. "
@@ -1079,8 +1121,8 @@ class Researcher:
             system_prompt=(
                 "You are Researcher, one of exactly three roles. Process each supplied page "
                 "independently. Extract at most two material, atomic, falsifiable, on-topic "
-                "observations "
-                "per page. Never transfer a statement or excerpt between page IDs. Every excerpt "
+                f"observations per page. {EVIDENCE_SEMANTIC_RULES}"
+                "Never transfer a statement or excerpt between page IDs. Every excerpt "
                 "must be one short, continuous, verbatim substring from that same page. Return "
                 "zero observations for weak, derivative, promotional, or off-topic pages. Select "
                 "a claim_frame_id only when "
