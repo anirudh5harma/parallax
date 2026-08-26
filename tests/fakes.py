@@ -6,8 +6,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from deep_research.models import FetchedPage, SearchResult
-from deep_research.urls import normalize_url
+from deep_research.domain.models import FetchedPage, SearchResult
+from deep_research.domain.urls import normalize_url
 
 
 class FakeModel:

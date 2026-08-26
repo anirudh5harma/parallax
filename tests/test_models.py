@@ -1,6 +1,6 @@
 import unittest
 
-from deep_research.models import (
+from deep_research.domain.models import (
     EvidenceObservation,
     Polarity,
     Priority,

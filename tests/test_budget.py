@@ -2,7 +2,7 @@ import threading
 import time
 import unittest
 
-from deep_research.budget import BudgetConfig, BudgetExceeded, BudgetManager
+from deep_research.domain.budget import BudgetConfig, BudgetExceeded, BudgetManager
 
 
 class BudgetManagerTests(unittest.TestCase):

@@ -4,8 +4,8 @@ import unittest
 from email.message import Message
 from unittest.mock import Mock, patch
 
-from deep_research.pdf_extraction import PdfExtraction
-from deep_research.providers import (
+from deep_research.infrastructure.pdf_extraction import PdfExtraction
+from deep_research.infrastructure.providers import (
     BedrockConverseModel,
     HttpPageFetcher,
     ProviderError,
@@ -75,10 +75,10 @@ class BedrockConverseModelTests(unittest.TestCase):
         error = ProviderError("busy", retryable=True, status=429, retry_after=0)
         with (
             patch(
-                "deep_research.providers._post_json",
+                "deep_research.infrastructure.providers._post_json",
                 side_effect=[error, self._simple_response()],
             ) as post,
-            patch("deep_research.providers.time.sleep") as sleep,
+            patch("deep_research.infrastructure.providers.time.sleep") as sleep,
         ):
             result = BedrockConverseModel("secret").generate_json(
                 system_prompt="system", user_prompt="user", schema_name="result",
@@ -91,7 +91,7 @@ class BedrockConverseModelTests(unittest.TestCase):
 
     def test_model_request_timeout_is_capped(self) -> None:
         with patch(
-            "deep_research.providers._post_json", return_value=self._simple_response()
+            "deep_research.infrastructure.providers._post_json", return_value=self._simple_response()
         ) as post:
             BedrockConverseModel("secret", max_request_seconds=60).generate_json(
                 system_prompt="system",
@@ -119,7 +119,7 @@ class BedrockConverseModelTests(unittest.TestCase):
             "additionalProperties": False,
         }
         with patch(
-            "deep_research.providers._post_json",
+            "deep_research.infrastructure.providers._post_json",
             side_effect=[too_long, valid],
         ) as post:
             result = BedrockConverseModel("secret").generate_json(
@@ -139,7 +139,7 @@ class BedrockConverseModelTests(unittest.TestCase):
 
     def test_does_not_retry_non_retryable_failure(self) -> None:
         error = ProviderError("bad request", retryable=False, status=400)
-        with patch("deep_research.providers._post_json", side_effect=error) as post:
+        with patch("deep_research.infrastructure.providers._post_json", side_effect=error) as post:
             with self.assertRaises(ProviderError):
                 BedrockConverseModel("secret").generate_json(
                     system_prompt="system", user_prompt="user", schema_name="result",
@@ -151,8 +151,8 @@ class BedrockConverseModelTests(unittest.TestCase):
     def test_retry_after_is_bounded_and_attempts_are_finite(self) -> None:
         error = ProviderError("busy", retryable=True, status=503, retry_after=99)
         with (
-            patch("deep_research.providers._post_json", side_effect=error) as post,
-            patch("deep_research.providers.time.sleep") as sleep,
+            patch("deep_research.infrastructure.providers._post_json", side_effect=error) as post,
+            patch("deep_research.infrastructure.providers.time.sleep") as sleep,
         ):
             with self.assertRaises(ProviderError):
                 BedrockConverseModel("secret").generate_json(
@@ -165,7 +165,7 @@ class BedrockConverseModelTests(unittest.TestCase):
         self.assertLessEqual(sleep.call_args.args[0], 0.1)
 
     def test_evidence_source_type_schema_uses_supported_enum_type(self) -> None:
-        from deep_research.researcher import EVIDENCE_SCHEMA
+        from deep_research.agents.researcher import EVIDENCE_SCHEMA
 
         source_type = EVIDENCE_SCHEMA["properties"]["observations"]["items"][
             "properties"
@@ -198,7 +198,7 @@ class BedrockConverseModelTests(unittest.TestCase):
                 }
             }
         }
-        with patch("deep_research.providers._post_json", return_value=response) as post:
+        with patch("deep_research.infrastructure.providers._post_json", return_value=response) as post:
             model = BedrockConverseModel(
                 "secret",
                 model_id="us.anthropic.claude-sonnet-4-6",
@@ -253,7 +253,7 @@ class BedrockConverseModelTests(unittest.TestCase):
             "required": ["items"],
             "additionalProperties": False,
         }
-        with patch("deep_research.providers._post_json", return_value=response):
+        with patch("deep_research.infrastructure.providers._post_json", return_value=response):
             with self.assertRaisesRegex(ProviderError, "too many items"):
                 BedrockConverseModel("secret").generate_json(
                     system_prompt="system",
@@ -294,10 +294,10 @@ class BedrockConverseModelTests(unittest.TestCase):
         )
         with (
             patch(
-                "deep_research.providers._post_json",
+                "deep_research.infrastructure.providers._post_json",
                 side_effect=[limited, {"results": []}],
             ) as post,
-            patch("deep_research.providers.time.sleep") as sleep,
+            patch("deep_research.infrastructure.providers.time.sleep") as sleep,
         ):
             results = TavilySearchClient("secret").search(
                 "query", max_results=5, timeout_seconds=10
@@ -319,7 +319,7 @@ class TavilyExtractClientTests(unittest.TestCase):
             ],
             "failed_results": [],
         }
-        with patch("deep_research.providers._post_json", return_value=response) as post:
+        with patch("deep_research.infrastructure.providers._post_json", return_value=response) as post:
             pages = TavilyExtractClient("secret").extract(
                 ["https://agency.gov/report"],
                 query="What changed?",
@@ -345,7 +345,7 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
         )
         with (
             patch.object(fetcher, "_fetch_once", return_value=(200, headers, b"%PDF-1.7")),
-            patch("deep_research.providers.extract_pdf", return_value=extraction) as extract,
+            patch("deep_research.infrastructure.providers.extract_pdf", return_value=extraction) as extract,
         ):
             page = fetcher.fetch("https://example.com/paper.pdf", timeout_seconds=5)
 
@@ -360,7 +360,7 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
         extraction = PdfExtraction("Useful evidence text.", "", 1)
         with (
             patch.object(fetcher, "_fetch_once", return_value=(200, headers, b"%PDF-1.7")),
-            patch("deep_research.providers.extract_pdf", return_value=extraction),
+            patch("deep_research.infrastructure.providers.extract_pdf", return_value=extraction),
         ):
             page = fetcher.fetch("https://example.com/download", timeout_seconds=5)
 
@@ -419,7 +419,7 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
                     "_fetch_once",
                     return_value=(200, headers, b"%PDF-1.7"),
                 ),
-                patch("deep_research.providers.extract_pdf") as extract,
+                patch("deep_research.infrastructure.providers.extract_pdf") as extract,
             ):
                 with self.assertRaisesRegex(ProviderError, "capacity unavailable"):
                     fetcher.fetch("https://example.com/paper.pdf", timeout_seconds=1)
@@ -441,11 +441,11 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
                 return_value=(200, headers, b"%PDF-1.7"),
             ),
             patch(
-                "deep_research.providers.time.monotonic",
+                "deep_research.infrastructure.providers.time.monotonic",
                 side_effect=[0, 0, 0.04, 0.07],
             ),
             patch(
-                "deep_research.providers.extract_pdf",
+                "deep_research.infrastructure.providers.extract_pdf",
                 return_value=extraction,
             ) as extract,
         ):
@@ -472,7 +472,7 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
                 return_value=("example.com", 443, ["93.184.216.34"]),
             ),
             patch(
-                "deep_research.providers._PinnedHTTPSConnection",
+                "deep_research.infrastructure.providers._PinnedHTTPSConnection",
                 return_value=connection,
             ),
         ):
@@ -499,7 +499,7 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
                 return_value=("example.com", 443, ["93.184.216.34"]),
             ),
             patch(
-                "deep_research.providers._PinnedHTTPSConnection",
+                "deep_research.infrastructure.providers._PinnedHTTPSConnection",
                 return_value=connection,
             ),
         ):
@@ -538,7 +538,7 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
         ]
         for addresses in (private, mixed):
             with self.subTest(addresses=addresses):
-                with patch("deep_research.providers.socket.getaddrinfo", return_value=addresses):
+                with patch("deep_research.infrastructure.providers.socket.getaddrinfo", return_value=addresses):
                     with self.assertRaisesRegex(ProviderError, "unsafe fetch host"):
                         HttpPageFetcher._resolve_safe_target("http://example.com/")
 
@@ -546,7 +546,7 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
         public = [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
         ]
-        with patch("deep_research.providers.socket.getaddrinfo", return_value=public):
+        with patch("deep_research.infrastructure.providers.socket.getaddrinfo", return_value=public):
             target = HttpPageFetcher._resolve_safe_target("https://example.com/path")
 
         self.assertEqual(("example.com", 443, ["93.184.216.34"]), target)

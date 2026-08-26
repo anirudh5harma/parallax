@@ -1,7 +1,7 @@
 import threading
 import unittest
 
-from deep_research.urls import UrlRegistry, normalize_url
+from deep_research.domain.urls import UrlRegistry, normalize_url
 
 
 class UrlTests(unittest.TestCase):

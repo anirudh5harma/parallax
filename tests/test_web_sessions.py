@@ -5,7 +5,7 @@ import json
 from unittest.mock import patch
 from pathlib import Path
 
-from deep_research.web_sessions import (
+from deep_research.api.sessions import (
     DEFAULT_BEDROCK_MODEL,
     MAX_SESSION_EVENTS,
     ResearchSession,
@@ -95,7 +95,7 @@ class ResearchSessionServiceTests(unittest.TestCase):
 
     def test_planner_thread_launch_failure_rolls_back_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deep_research.web_sessions.threading.Thread.start",
+            "deep_research.api.sessions.threading.Thread.start",
             side_effect=RuntimeError("thread unavailable"),
         ):
             service = ResearchSessionService(output_root=Path(tmp))
@@ -112,7 +112,7 @@ class ResearchSessionServiceTests(unittest.TestCase):
             session.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
 
             with patch(
-                "deep_research.web_sessions.threading.Thread.start",
+                "deep_research.api.sessions.threading.Thread.start",
                 side_effect=RuntimeError("thread unavailable"),
             ), self.assertRaisesRegex(SessionLaunchError, "worker could not start"):
                 service.start(session.id)
@@ -178,7 +178,7 @@ class ResearchSessionServiceTests(unittest.TestCase):
             second = service.create("Second bounded query")
             second.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
 
-            with patch("deep_research.web_sessions.threading.Thread") as worker:
+            with patch("deep_research.api.sessions.threading.Thread") as worker:
                 service.start(first.id)
                 with self.assertRaisesRegex(SessionCapacityError, "capacity"):
                     service.start(second.id)
@@ -313,7 +313,7 @@ class ResearchSessionServiceTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch(
-                    "deep_research.web_sessions.subprocess.Popen",
+                    "deep_research.api.sessions.subprocess.Popen",
                     side_effect=OSError("startup failed"),
                 ),
             ):

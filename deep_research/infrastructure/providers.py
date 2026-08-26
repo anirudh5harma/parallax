@@ -1,0 +1,911 @@
+from __future__ import annotations
+
+import hashlib
+import html
+import http.client
+import ipaddress
+import json
+import math
+import re
+import socket
+import ssl
+import threading
+import time
+import urllib.error
+import urllib.request
+from html.parser import HTMLParser
+from typing import Any, Protocol
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
+
+from ..domain.models import FetchedPage, SearchResult
+from ..domain.urls import normalize_url
+from .pdf_extraction import PdfExtractionError, extract_pdf
+
+
+class ProviderError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        status: int | None = None,
+        retry_after: float | None = None,
+        code: str = "provider_unavailable",
+        public_message: str = "A research provider is temporarily unavailable.",
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status = status
+        self.retry_after = retry_after
+        self.code = code
+        self.public_message = public_message
+
+
+class SchemaValidationError(ProviderError):
+    pass
+
+
+def _validate_api_key(value: str) -> None:
+    if not value or any(ord(character) < 33 or ord(character) > 126 for character in value):
+        raise ValueError("API key must be non-empty printable ASCII without whitespace")
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        del request, file_pointer, code, message, headers, new_url
+        return None
+
+
+class StructuredModel(Protocol):
+    def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema_name: str,
+        schema: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]: ...
+
+
+class SearchClient(Protocol):
+    def search(
+        self, query: str, *, max_results: int, timeout_seconds: float
+    ) -> list[SearchResult]: ...
+
+
+class PageFetcher(Protocol):
+    def fetch(self, url: str, *, timeout_seconds: float) -> FetchedPage: ...
+
+
+class BatchPageExtractor(Protocol):
+    def extract(
+        self,
+        urls: list[str],
+        *,
+        query: str,
+        timeout_seconds: float,
+    ) -> list[FetchedPage]: ...
+
+
+def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    try:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", **headers},
+            method="POST",
+        )
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        with opener.open(request, timeout=max(0.1, timeout_seconds)) as response:
+            raw = response.read(2_000_001)
+            if len(raw) > 2_000_000:
+                raise ProviderError("provider response exceeds byte limit")
+            data = json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        retryable = exc.code in {408, 409, 429} or 500 <= exc.code < 600
+        retry_after: float | None = None
+        detail = ""
+        try:
+            error_body = json.loads(exc.read(16_384))
+            if isinstance(error_body, dict):
+                raw_detail = error_body.get("message") or error_body.get("Message")
+                if isinstance(raw_detail, str):
+                    detail = ": " + " ".join(raw_detail.split())[:500]
+        except (OSError, json.JSONDecodeError):
+            pass
+        raw_retry_after = exc.headers.get("Retry-After") if exc.headers else None
+        if raw_retry_after:
+            try:
+                retry_after = max(0.0, float(raw_retry_after))
+            except ValueError:
+                pass
+        code, public_message = _provider_http_failure(url, exc.code, detail)
+        raise ProviderError(
+            f"provider HTTP error: {exc.code}{detail}",
+            retryable=retryable,
+            status=exc.code,
+            retry_after=retry_after,
+            code=code,
+            public_message=public_message,
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ProviderError(f"request failed: {type(exc).__name__}") from exc
+    if not isinstance(data, dict):
+        raise ProviderError("provider returned non-object JSON")
+    return data
+
+
+def _provider_http_failure(url: str, status: int, detail: str) -> tuple[str, str]:
+    """Map provider failures to stable, secret-free UI errors."""
+    host = urlsplit(url).hostname or ""
+    normalized_detail = detail.casefold()
+    if host.startswith("bedrock-runtime."):
+        if status in {401, 403}:
+            return (
+                "bedrock_access_denied",
+                "Model access is unavailable. Check the Bedrock key, model access, and AWS region.",
+            )
+        if status == 402 or "servicequotaexceeded" in normalized_detail:
+            return (
+                "bedrock_quota_exhausted",
+                "The Bedrock service quota is exhausted. Increase the quota or try again later.",
+            )
+        if status == 429:
+            return (
+                "bedrock_rate_limited",
+                "Bedrock is rate-limiting this workspace. Wait briefly, then retry.",
+            )
+        if status in {408, 409}:
+            return (
+                "bedrock_unavailable",
+                "Bedrock could not complete the request. Try again shortly.",
+            )
+        if 400 <= status < 500:
+            return (
+                "bedrock_request_rejected",
+                "Bedrock rejected the model request. Check the model and request configuration.",
+            )
+        return "bedrock_unavailable", "Bedrock is temporarily unavailable. Try again shortly."
+    if host == "api.tavily.com":
+        if status in {401, 403}:
+            return (
+                "tavily_access_denied",
+                "Web search access is unavailable. Check the Tavily API key.",
+            )
+        if status in {432, 433}:
+            return (
+                "tavily_quota_exhausted",
+                "The Tavily usage limit is exhausted. Increase the plan limit or wait for reset.",
+            )
+        if status == 429:
+            return (
+                "tavily_rate_limited",
+                "Web search is rate-limited. Wait briefly, then retry.",
+            )
+        if status in {408, 409}:
+            return (
+                "tavily_unavailable",
+                "Web search could not complete the request. Try again shortly.",
+            )
+        if 400 <= status < 500:
+            return (
+                "tavily_request_rejected",
+                "Web search rejected the request. Check the API configuration.",
+            )
+        return "tavily_unavailable", "Web search is temporarily unavailable. Try again shortly."
+    return "provider_unavailable", "A research provider is temporarily unavailable."
+
+
+def provider_error_context(code: str) -> tuple[str | None, bool]:
+    provider = next(
+        (name for name in ("bedrock", "tavily") if code.startswith(f"{name}_")),
+        None,
+    )
+    retryable = code.endswith(("_rate_limited", "_unavailable"))
+    return provider, retryable
+
+
+def _post_json_with_retry(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout_seconds: float,
+    *,
+    max_attempts: int = 2,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    last_error: ProviderError | None = None
+    for attempt in range(max_attempts):
+        remaining = timeout_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            break
+        try:
+            return _post_json(url, payload, headers, remaining)
+        except ProviderError as exc:
+            last_error = exc
+            if not exc.retryable or attempt + 1 >= max_attempts:
+                break
+            delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
+            time.sleep(min(delay, 5.0, max(0.0, remaining)))
+    raise last_error or ProviderError("provider request timed out")
+
+
+_UNSUPPORTED_BEDROCK_SCHEMA_KEYS = {
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "maxItems",
+    "maxLength",
+    "maximum",
+    "minLength",
+    "minimum",
+    "multipleOf",
+}
+
+
+def _bedrock_schema(value: Any) -> Any:
+    """Project a schema onto Bedrock's supported structured-output subset."""
+    if isinstance(value, list):
+        return [_bedrock_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in _UNSUPPORTED_BEDROCK_SCHEMA_KEYS:
+            continue
+        if key == "minItems" and item not in (0, 1):
+            continue
+        projected[key] = _bedrock_schema(item)
+    constraints: list[str] = []
+    for key, label in (
+        ("minLength", "length must be at least"),
+        ("maxLength", "length must be at most"),
+        ("minItems", "item count must be at least"),
+        ("maxItems", "item count must be at most"),
+        ("minimum", "must be at least"),
+        ("maximum", "must be at most"),
+        ("exclusiveMinimum", "must be greater than"),
+        ("exclusiveMaximum", "must be less than"),
+        ("multipleOf", "must be a multiple of"),
+    ):
+        if key in value and key not in projected:
+            constraints.append(f"{label} {value[key]}")
+    if constraints:
+        existing = str(projected.get("description", "")).strip()
+        guidance = "Constraints: " + "; ".join(constraints) + "."
+        projected["description"] = f"{existing} {guidance}".strip()
+    return projected
+
+
+def _validate_json_schema(value: Any, schema: dict[str, Any], path: str = "$") -> None:
+    """Validate the small JSON Schema subset used by this project."""
+    expected = schema.get("type")
+    expected_types = expected if isinstance(expected, list) else [expected]
+    type_checks = {
+        "null": lambda item: item is None,
+        "object": lambda item: isinstance(item, dict),
+        "array": lambda item: isinstance(item, list),
+        "string": lambda item: isinstance(item, str),
+        "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
+        "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+        "boolean": lambda item: isinstance(item, bool),
+    }
+    if expected is not None and not any(
+        item in type_checks and type_checks[item](value) for item in expected_types
+    ):
+        raise SchemaValidationError(f"model response violates schema at {path}: wrong type")
+    if "enum" in schema and value not in schema["enum"]:
+        raise SchemaValidationError(f"model response violates schema at {path}: invalid enum")
+
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        missing = [key for key in required if key not in value]
+        if missing:
+            raise SchemaValidationError(
+                f"model response violates schema at {path}: missing {missing}"
+            )
+        if schema.get("additionalProperties") is False:
+            extras = set(value) - set(properties)
+            if extras:
+                raise SchemaValidationError(
+                    f"model response violates schema at {path}: extra properties"
+                )
+        for key, item in value.items():
+            child_schema = properties.get(key)
+            if isinstance(child_schema, dict):
+                _validate_json_schema(item, child_schema, f"{path}.{key}")
+    elif isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            raise SchemaValidationError(f"model response violates schema at {path}: too few items")
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            raise SchemaValidationError(f"model response violates schema at {path}: too many items")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                _validate_json_schema(item, item_schema, f"{path}[{index}]")
+    elif isinstance(value, str):
+        if len(value) < schema.get("minLength", 0):
+            raise SchemaValidationError(f"model response violates schema at {path}: too short")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise SchemaValidationError(f"model response violates schema at {path}: too long")
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            raise SchemaValidationError(f"model response violates schema at {path}: below minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            raise SchemaValidationError(f"model response violates schema at {path}: above maximum")
+        if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
+            raise SchemaValidationError(
+                f"model response violates schema at {path}: below exclusive minimum"
+            )
+        if "exclusiveMaximum" in schema and value >= schema["exclusiveMaximum"]:
+            raise SchemaValidationError(
+                f"model response violates schema at {path}: above exclusive maximum"
+            )
+        if "multipleOf" in schema:
+            quotient = value / schema["multipleOf"]
+            if not math.isclose(quotient, round(quotient)):
+                raise SchemaValidationError(
+                    f"model response violates schema at {path}: invalid multiple"
+                )
+
+
+class BedrockConverseModel:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        model_id: str = "us.anthropic.claude-sonnet-4-6",
+        region: str = "us-east-1",
+        max_tokens: int = 4096,
+        max_attempts: int = 2,
+        max_request_seconds: float = 60,
+    ) -> None:
+        _validate_api_key(api_key)
+        if not model_id or not region:
+            raise ValueError("model_id and region must not be empty")
+        if not re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-\d", region):
+            raise ValueError("invalid AWS region")
+        self.api_key = api_key
+        self.model_id = model_id
+        self.region = region
+        if max_request_seconds <= 0:
+            raise ValueError("max_request_seconds must be positive")
+        self.max_tokens = max_tokens
+        self.max_attempts = max_attempts
+        self.max_request_seconds = max_request_seconds
+
+    def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema_name: str,
+        schema: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        endpoint = (
+            f"https://bedrock-runtime.{self.region}.amazonaws.com/model/"
+            f"{quote(self.model_id, safe='.:_-')}/converse"
+        )
+        payload = {
+            "system": [{"text": system_prompt}],
+            "messages": [
+                {"role": "user", "content": [{"text": user_prompt}]}
+            ],
+            "inferenceConfig": {"maxTokens": self.max_tokens, "temperature": 0},
+            "outputConfig": {
+                "textFormat": {
+                    "type": "json_schema",
+                    "structure": {
+                        "jsonSchema": {
+                            "name": schema_name,
+                            "description": f"Structured output for {schema_name}",
+                            "schema": json.dumps(
+                                _bedrock_schema(schema),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    },
+                }
+            },
+        }
+        last_error: ProviderError | None = None
+        operation_timeout = min(timeout_seconds, self.max_request_seconds)
+        started = time.monotonic()
+        for attempt in range(self.max_attempts):
+            remaining = operation_timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise ProviderError("model request timed out")
+            try:
+                response = _post_json(
+                    endpoint,
+                    payload,
+                    {"Authorization": f"Bearer {self.api_key}"},
+                    remaining,
+                )
+                value = self._extract_json(response)
+                _validate_json_schema(value, schema)
+                return value
+            except SchemaValidationError as exc:
+                last_error = exc
+                if attempt + 1 >= self.max_attempts:
+                    break
+                json_schema = payload["outputConfig"]["textFormat"]["structure"][
+                    "jsonSchema"
+                ]
+                json_schema["description"] = (
+                    f"Structured output for {schema_name}. Correct the prior validation "
+                    f"failure: {str(exc)[:300]}"
+                )
+                continue
+            except ProviderError as exc:
+                last_error = exc
+                if not exc.retryable or attempt + 1 >= self.max_attempts:
+                    break
+                remaining = operation_timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    break
+                delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
+                time.sleep(min(delay, 5.0, max(0.0, remaining)))
+        raise last_error or ProviderError("model request failed")
+
+    @staticmethod
+    def _extract_json(response: dict[str, Any]) -> dict[str, Any]:
+        texts: list[str] = []
+        output = response.get("output")
+        if isinstance(output, dict):
+            message = output.get("message")
+            if isinstance(message, dict):
+                content_items = message.get("content", [])
+                if isinstance(content_items, list):
+                    for content in content_items:
+                        if isinstance(content, dict) and isinstance(
+                            content.get("text"), str
+                        ):
+                            texts.append(content["text"])
+        if not texts:
+            raise ProviderError("model response contained no text")
+        try:
+            value = json.loads(texts[-1])
+        except json.JSONDecodeError as exc:
+            raise ProviderError("model returned invalid JSON") from exc
+        if not isinstance(value, dict):
+            raise ProviderError("model returned non-object JSON")
+        return value
+
+
+class TavilySearchClient:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        endpoint: str = "https://api.tavily.com/search",
+        max_request_seconds: float = 30,
+    ) -> None:
+        _validate_api_key(api_key)
+        parsed_endpoint = urlsplit(endpoint)
+        if (
+            parsed_endpoint.scheme != "https"
+            or parsed_endpoint.hostname != "api.tavily.com"
+            or parsed_endpoint.port not in (None, 443)
+            or parsed_endpoint.path != "/search"
+            or parsed_endpoint.username
+            or parsed_endpoint.password
+        ):
+            raise ValueError("Tavily endpoint must use the trusted API origin")
+        if max_request_seconds <= 0:
+            raise ValueError("max_request_seconds must be positive")
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.max_request_seconds = max_request_seconds
+
+    def search(
+        self, query: str, *, max_results: int, timeout_seconds: float
+    ) -> list[SearchResult]:
+        response = _post_json_with_retry(
+            self.endpoint,
+            {
+                "query": query,
+                "search_depth": "basic",
+                "max_results": max_results,
+                "include_answer": False,
+                "include_raw_content": False,
+            },
+            {"Authorization": f"Bearer {self.api_key}"},
+            min(timeout_seconds, self.max_request_seconds),
+        )
+        results = response.get("results")
+        if not isinstance(results, list):
+            raise ProviderError("search response missing results")
+        parsed: list[SearchResult] = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url")
+            title = item.get("title")
+            if isinstance(url, str) and isinstance(title, str):
+                parsed.append(
+                    SearchResult(url=url, title=title, snippet=str(item.get("content", "")))
+                )
+        return parsed
+
+
+class TavilyExtractClient:
+    """Query-focused batch extraction for URLs already selected from search."""
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        endpoint: str = "https://api.tavily.com/extract",
+        max_request_seconds: float = 30,
+        chunks_per_source: int = 5,
+    ) -> None:
+        _validate_api_key(api_key)
+        parsed_endpoint = urlsplit(endpoint)
+        if (
+            parsed_endpoint.scheme != "https"
+            or parsed_endpoint.hostname != "api.tavily.com"
+            or parsed_endpoint.port not in (None, 443)
+            or parsed_endpoint.path != "/extract"
+            or parsed_endpoint.username
+            or parsed_endpoint.password
+        ):
+            raise ValueError("Tavily endpoint must use the trusted API origin")
+        if max_request_seconds <= 0:
+            raise ValueError("max_request_seconds must be positive")
+        if not 1 <= chunks_per_source <= 5:
+            raise ValueError("chunks_per_source must be between 1 and 5")
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.max_request_seconds = max_request_seconds
+        self.chunks_per_source = chunks_per_source
+
+    def extract(
+        self,
+        urls: list[str],
+        *,
+        query: str,
+        timeout_seconds: float,
+    ) -> list[FetchedPage]:
+        if not 1 <= len(urls) <= 20:
+            raise ValueError("Tavily extraction batch must contain 1-20 URLs")
+        response = _post_json_with_retry(
+            self.endpoint,
+            {
+                "urls": urls,
+                "query": query,
+                "chunks_per_source": self.chunks_per_source,
+                "extract_depth": "basic",
+                "format": "markdown",
+                "include_images": False,
+                "timeout": min(timeout_seconds, self.max_request_seconds),
+            },
+            {"Authorization": f"Bearer {self.api_key}"},
+            min(timeout_seconds, self.max_request_seconds),
+        )
+        results = response.get("results")
+        if not isinstance(results, list):
+            raise ProviderError("extract response missing results")
+        pages: list[FetchedPage] = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url")
+            raw_content = item.get("raw_content")
+            if not isinstance(url, str) or not isinstance(raw_content, str):
+                continue
+            text = " ".join(raw_content.split())
+            if not text:
+                continue
+            normalized = normalize_url(url)
+            pages.append(
+                FetchedPage(
+                    url=url,
+                    normalized_url=normalized,
+                    domain=urlsplit(normalized).netloc,
+                    title="",
+                    text=text,
+                    content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                )
+            )
+        return pages
+
+
+class _TextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.title_parts: list[str] = []
+        self._ignored_depth = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag in {"script", "style", "noscript", "svg"}:
+            self._ignored_depth += 1
+        elif tag == "title":
+            self._in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript", "svg"} and self._ignored_depth:
+            self._ignored_depth -= 1
+        elif tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        stripped = data.strip()
+        if stripped:
+            self.parts.append(stripped)
+            if self._in_title:
+                self.title_parts.append(stripped)
+
+
+class HttpPageFetcher:
+    PDF_CONTENT_TYPES = frozenset({"application/pdf", "application/x-pdf"})
+
+    def __init__(
+        self,
+        *,
+        max_bytes: int = 2_000_000,
+        max_pdf_bytes: int = 20_000_000,
+        max_pdf_pages: int = 150,
+        max_pdf_chars: int = 120_000,
+        max_pdf_parse_seconds: float = 15,
+        max_concurrent_pdf_extractions: int = 1,
+        max_redirects: int = 3,
+        max_fetch_seconds: float = 30,
+    ) -> None:
+        if min(
+            max_bytes,
+            max_pdf_bytes,
+            max_pdf_pages,
+            max_pdf_chars,
+            max_pdf_parse_seconds,
+            max_concurrent_pdf_extractions,
+            max_fetch_seconds,
+        ) <= 0:
+            raise ValueError("fetch limits must be positive")
+        self.max_bytes = max_bytes
+        self.max_pdf_bytes = max_pdf_bytes
+        self.max_pdf_pages = max_pdf_pages
+        self.max_pdf_chars = max_pdf_chars
+        self.max_pdf_parse_seconds = max_pdf_parse_seconds
+        self._pdf_slots = threading.BoundedSemaphore(max_concurrent_pdf_extractions)
+        self.max_redirects = max_redirects
+        self.max_fetch_seconds = max_fetch_seconds
+
+    def fetch(self, url: str, *, timeout_seconds: float) -> FetchedPage:
+        timeout_seconds = min(timeout_seconds, self.max_fetch_seconds)
+        started = time.monotonic()
+        current_url = self._prepare_fetch_url(url)
+        for redirect_count in range(self.max_redirects + 1):
+            remaining = timeout_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                raise ProviderError("fetch timed out")
+            status, headers, raw = self._fetch_once(current_url, remaining)
+            if status in {301, 302, 303, 307, 308}:
+                if redirect_count >= self.max_redirects:
+                    raise ProviderError("too many redirects")
+                location = headers.get("Location")
+                if not location:
+                    raise ProviderError("redirect missing location")
+                current_url = self._prepare_fetch_url(urljoin(current_url, location))
+                continue
+            if not 200 <= status < 300:
+                raise ProviderError(f"page HTTP error: {status}")
+            content_type = headers.get_content_type().casefold()
+            pdf_hint = self._is_pdf_hint(current_url, headers)
+            pdf_signature = self._looks_like_pdf(raw)
+            is_pdf = pdf_hint or pdf_signature
+            if pdf_hint and not pdf_signature:
+                raise ProviderError("invalid PDF signature")
+            if not is_pdf and content_type not in {"text/html", "text/plain"}:
+                raise ProviderError(f"unsupported content type: {content_type}")
+            charset = headers.get_content_charset() or "utf-8"
+            final_url = current_url
+            break
+        else:  # pragma: no cover - loop always exits or raises
+            raise ProviderError("too many redirects")
+        byte_limit = self.max_pdf_bytes if is_pdf else self.max_bytes
+        if len(raw) > byte_limit:
+            kind = "PDF" if is_pdf else "page"
+            raise ProviderError(f"{kind} exceeds byte limit")
+        if is_pdf:
+            remaining = timeout_seconds - (time.monotonic() - started)
+            slot_timeout = min(self.max_pdf_parse_seconds, remaining)
+            if not self._pdf_slots.acquire(timeout=max(0, slot_timeout)):
+                raise ProviderError("PDF extraction capacity unavailable")
+            try:
+                remaining = timeout_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise ProviderError("fetch timed out")
+                try:
+                    extraction = extract_pdf(
+                        raw,
+                        timeout_seconds=min(self.max_pdf_parse_seconds, remaining),
+                        max_pages=self.max_pdf_pages,
+                        max_chars=self.max_pdf_chars,
+                    )
+                except PdfExtractionError as exc:
+                    raise ProviderError(str(exc)) from exc
+            finally:
+                self._pdf_slots.release()
+            text = extraction.text
+            title = extraction.title
+        else:
+            decoded = raw.decode(charset, errors="replace")
+            if content_type == "text/html":
+                parser = _TextExtractor()
+                parser.feed(decoded)
+                text = " ".join(parser.parts)
+                title = " ".join(parser.title_parts)
+            else:
+                text = decoded
+                title = ""
+            text = " ".join(html.unescape(text).split())
+        if not text:
+            raise ProviderError("page contained no extractable text")
+        final_normalized = normalize_url(final_url)
+        return FetchedPage(
+            url=final_url,
+            normalized_url=final_normalized,
+            domain=urlsplit(final_normalized).netloc,
+            title=title,
+            text=text,
+            content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    @classmethod
+    def _is_pdf_hint(cls, url: str, headers: http.client.HTTPMessage) -> bool:
+        if headers.get_content_type().casefold() in cls.PDF_CONTENT_TYPES:
+            return True
+        path = urlsplit(url).path.casefold()
+        disposition = headers.get("Content-Disposition", "").casefold()
+        return path.endswith(".pdf") or bool(re.search(r"filename\*?=.*\.pdf", disposition))
+
+    @staticmethod
+    def _looks_like_pdf(raw: bytes) -> bool:
+        return b"%PDF-" in raw[:1024]
+
+    def _response_byte_limit(
+        self,
+        url: str,
+        headers: http.client.HTTPMessage,
+        prefix: bytes = b"",
+    ) -> int:
+        is_pdf = self._is_pdf_hint(url, headers) or self._looks_like_pdf(prefix)
+        return self.max_pdf_bytes if is_pdf else self.max_bytes
+
+    @staticmethod
+    def _prepare_fetch_url(url: str) -> str:
+        parsed = urlsplit(url.strip())
+        if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("URL must use HTTP(S)")
+        if parsed.username or parsed.password:
+            raise ProviderError("unsafe fetch credentials")
+        return parsed._replace(scheme=parsed.scheme.casefold(), fragment="").geturl()
+
+    def _fetch_once(
+        self,
+        url: str,
+        timeout_seconds: float,
+    ) -> tuple[int, http.client.HTTPMessage, bytes]:
+        parsed = urlsplit(url)
+        host, port, addresses = self._resolve_safe_target(url)
+        path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        headers = {
+            "Host": host,
+            "User-Agent": "TransparentResearch/0.1 (+research; contact=local)",
+            "Accept": (
+                "text/html,application/pdf;q=0.95,application/x-pdf;q=0.9,"
+                "text/plain;q=0.8"
+            ),
+            "Accept-Encoding": "identity",
+            "Connection": "close",
+        }
+        started = time.monotonic()
+        last_error: Exception | None = None
+        for address in addresses:
+            remaining = timeout_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                break
+            if parsed.scheme == "https":
+                connection: http.client.HTTPConnection = _PinnedHTTPSConnection(
+                    host,
+                    address,
+                    port,
+                    timeout=max(0.1, remaining),
+                )
+            else:
+                connection = http.client.HTTPConnection(
+                    address,
+                    port,
+                    timeout=max(0.1, remaining),
+                )
+            try:
+                connection.request("GET", path, headers=headers)
+                response = connection.getresponse()
+                if response.status in {301, 302, 303, 307, 308} or not (
+                    200 <= response.status < 300
+                ):
+                    return response.status, response.headers, b""
+                prefix = response.read(1024)
+                if self._is_pdf_hint(url, response.headers) and not self._looks_like_pdf(
+                    prefix
+                ):
+                    return response.status, response.headers, prefix
+                byte_limit = self._response_byte_limit(url, response.headers, prefix)
+                raw = prefix + response.read(max(0, byte_limit + 1 - len(prefix)))
+                return response.status, response.headers, raw
+            except (TimeoutError, OSError, http.client.HTTPException) as exc:
+                last_error = exc
+            finally:
+                connection.close()
+        if timeout_seconds - (time.monotonic() - started) <= 0:
+            raise ProviderError("fetch timed out") from last_error
+        error_name = type(last_error).__name__ if last_error else "ConnectionError"
+        raise ProviderError(f"fetch failed: {error_name}") from last_error
+
+    @staticmethod
+    def _resolve_safe_target(url: str) -> tuple[str, int, list[str]]:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        if parsed.username or parsed.password:
+            raise ProviderError("unsafe fetch credentials")
+        if not host or host.rstrip(".").casefold() == "localhost":
+            raise ProviderError("unsafe fetch host")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        expected_port = 443 if parsed.scheme == "https" else 80
+        if port != expected_port:
+            raise ProviderError("unsafe fetch port")
+        try:
+            targets = socket.getaddrinfo(
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
+        except socket.gaierror as exc:
+            raise ProviderError("fetch host resolution failed") from exc
+        addresses = list(dict.fromkeys(target[4][0] for target in targets))
+        if not addresses or any(
+            not ipaddress.ip_address(address).is_global for address in addresses
+        ):
+            raise ProviderError("unsafe fetch host")
+        return host.rstrip("."), port, addresses
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        hostname: str,
+        address: str,
+        port: int,
+        *,
+        timeout: float,
+    ) -> None:
+        super().__init__(
+            hostname,
+            port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._pinned_address = address
+
+    def connect(self) -> None:
+        sock = socket.create_connection(
+            (self._pinned_address, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)

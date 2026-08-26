@@ -4,15 +4,15 @@ import threading
 import unittest
 from pathlib import Path
 
-from deep_research.audit import JsonlAuditLogger
-from deep_research.budget import BudgetConfig, BudgetManager
-from deep_research.critic import CriticSynthesizer
-from deep_research.ledger import EvidenceLedger
-from deep_research.models import Priority, ResearchResult, ResearchTask, SearchResult
-from deep_research.pipeline import ResearchPipeline
-from deep_research.planner import Planner
-from deep_research.researcher import FetchGate, Researcher
-from deep_research.urls import UrlRegistry
+from deep_research.infrastructure.audit import JsonlAuditLogger
+from deep_research.domain.budget import BudgetConfig, BudgetManager
+from deep_research.agents.critic import CriticSynthesizer
+from deep_research.domain.ledger import EvidenceLedger
+from deep_research.domain.models import Priority, ResearchResult, ResearchTask, SearchResult
+from deep_research.application.pipeline import ResearchPipeline
+from deep_research.agents.planner import Planner
+from deep_research.agents.researcher import FetchGate, Researcher
+from deep_research.domain.urls import UrlRegistry
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 

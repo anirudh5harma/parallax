@@ -6,9 +6,9 @@ from pathlib import Path
 
 import uvicorn
 
-from .budget import BudgetConfig
-from .web_sessions import ResearchSessionService
-from .webapp import create_app
+from .api.http import create_app
+from .api.sessions import ResearchSessionService
+from .domain.budget import BudgetConfig
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -3,17 +3,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deep_research.audit import JsonlAuditLogger
-from deep_research.budget import BudgetConfig, BudgetManager
-from deep_research.critic import CriticSynthesizer, _report_schema
-from deep_research.ledger import EvidenceLedger
-from deep_research.models import (
+from deep_research.infrastructure.audit import JsonlAuditLogger
+from deep_research.domain.budget import BudgetConfig, BudgetManager
+from deep_research.agents.critic import CriticSynthesizer, _report_schema
+from deep_research.domain.ledger import EvidenceLedger
+from deep_research.domain.models import (
     EvidenceObservation,
     Polarity,
     Priority,
     ResearchTask,
 )
-from deep_research.synthesizer import CitationError, build_synthesis_context, render_report
+from deep_research.agents.synthesizer import CitationError, build_synthesis_context, render_report
 from tests.fakes import FakeModel
 
 

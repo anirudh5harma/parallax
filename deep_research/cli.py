@@ -7,9 +7,10 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from .app import create_plan, load_plan, run_query
-from .budget import BudgetConfig
-from .providers import (
+from .application.runtime import worker_script_path, worker_timeout
+from .application.service import create_plan, load_plan, run_query
+from .domain.budget import BudgetConfig
+from .infrastructure.providers import (
     BedrockConverseModel,
     HttpPageFetcher,
     TavilyExtractClient,
@@ -61,8 +62,8 @@ def config_from_args(args: argparse.Namespace) -> BudgetConfig:
 
 
 def _worker_timeout(total_seconds: float) -> float:
-    cleanup_grace = min(5.0, max(0.05, total_seconds * 0.1))
-    return max(0.001, total_seconds - cleanup_grace)
+    """Backward-compatible alias for callers of the original CLI helper."""
+    return worker_timeout(total_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                 "missing required environment variables: " + ", ".join(missing)
             )
         command_args = list(argv) if argv is not None else sys.argv[1:]
-        worker_path = Path(__file__).with_name("_worker.py").resolve()
+        worker_path = worker_script_path()
         command = [sys.executable, "-I", str(worker_path), *command_args]
         worker_environment = os.environ.copy()
         worker_environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(

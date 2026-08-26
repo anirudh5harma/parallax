@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deep_research.app import _completion_status, create_plan, run_query
-from deep_research.budget import BudgetConfig
-from deep_research.models import (
+from deep_research.application.service import _completion_status, create_plan, run_query
+from deep_research.domain.budget import BudgetConfig
+from deep_research.domain.models import (
     EvidenceObservation,
     Polarity,
     Priority,
@@ -15,7 +15,7 @@ from deep_research.models import (
     SearchResult,
     TaskStatus,
 )
-from deep_research.providers import ProviderError
+from deep_research.infrastructure.providers import ProviderError
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 

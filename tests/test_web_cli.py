@@ -5,10 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from deep_research.budget import BudgetConfig
+from deep_research.domain.budget import BudgetConfig
 from deep_research.cli import _worker_timeout
 from deep_research.web_cli import main
-from deep_research.web_sessions import ResearchSessionService
+from deep_research.api.sessions import ResearchSessionService
 
 
 class WebCliTests(unittest.TestCase):
@@ -78,7 +78,7 @@ class WebCliTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch(
-                    "deep_research.web_sessions.subprocess.Popen",
+                    "deep_research.api.sessions.subprocess.Popen",
                     return_value=ExitedProcess(),
                 ) as popen,
             ):

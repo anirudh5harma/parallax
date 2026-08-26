@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from deep_research.web_sessions import ResearchSessionService, SessionCapacityError
-from deep_research.webapp import AnonymousWorkspaceQuota, create_app
+from deep_research.api.sessions import ResearchSessionService, SessionCapacityError
+from deep_research.api.http import AnonymousWorkspaceQuota, create_app
 
 
 WORKSPACE_A = "a" * 32
@@ -111,7 +111,7 @@ class LocalApiBoundaryTests(unittest.TestCase):
             second.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
             client = TestClient(create_app(service))
 
-            with patch("deep_research.web_sessions.threading.Thread"):
+            with patch("deep_research.api.sessions.threading.Thread"):
                 service.start(first.id, workspace_id=WORKSPACE_A)
                 responses = [
                     client.post(

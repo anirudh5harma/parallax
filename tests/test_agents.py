@@ -8,14 +8,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from deep_research.audit import JsonlAuditLogger
-from deep_research.budget import BudgetConfig, BudgetExceeded, BudgetManager
-from deep_research.models import FetchedPage, Priority, ResearchTask, SearchResult, TaskStatus
-from deep_research.planner import InvalidResearchQuery, Planner
-from deep_research.providers import ProviderError
-from deep_research.researcher import FetchGate, Researcher, _Candidate, _select_candidates
-from deep_research.urls import UrlRegistry
-from deep_research.urls import normalize_url
+from deep_research.infrastructure.audit import JsonlAuditLogger
+from deep_research.domain.budget import BudgetConfig, BudgetExceeded, BudgetManager
+from deep_research.domain.models import FetchedPage, Priority, ResearchTask, SearchResult, TaskStatus
+from deep_research.agents.planner import InvalidResearchQuery, Planner
+from deep_research.infrastructure.providers import ProviderError
+from deep_research.agents.researcher import FetchGate, Researcher, _Candidate, _select_candidates
+from deep_research.domain.urls import UrlRegistry
+from deep_research.domain.urls import normalize_url
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 
@@ -42,7 +42,7 @@ class PlannerTests(unittest.TestCase):
             }
 
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deep_research.planner.current_utc_date", return_value="2026-08-26"
+            "deep_research.agents.planner.current_utc_date", return_value="2026-08-26"
         ):
             tasks = Planner(
                 FakeModel({"research_plan": plan}),
@@ -76,7 +76,7 @@ class PlannerTests(unittest.TestCase):
             }
         )
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deep_research.planner.current_utc_date", return_value="2026-08-26"
+            "deep_research.agents.planner.current_utc_date", return_value="2026-08-26"
         ):
             Planner(
                 model,
@@ -616,7 +616,7 @@ class ResearcherTests(unittest.TestCase):
             return {"queries": [{"query_text": query, "rationale": "freshness"}]}
 
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deep_research.researcher.current_utc_date", return_value="2026-08-26"
+            "deep_research.agents.researcher.current_utc_date", return_value="2026-08-26"
         ):
             Researcher(
                 model=FakeModel(
@@ -656,7 +656,7 @@ class ResearcherTests(unittest.TestCase):
             }
         )
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deep_research.researcher.current_utc_date", return_value="2026-08-26"
+            "deep_research.agents.researcher.current_utc_date", return_value="2026-08-26"
         ):
             Researcher(
                 model=model,

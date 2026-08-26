@@ -6,7 +6,7 @@ from io import BytesIO
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from deep_research.pdf_extraction import (
+from deep_research.infrastructure.pdf_extraction import (
     PdfExtractionError,
     _extract_pdf_inline,
     extract_pdf,
