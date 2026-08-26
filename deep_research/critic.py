@@ -74,7 +74,10 @@ FINDING_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "claim_id": {"type": "string"},
-        "synthesis": {"type": "string", "maxLength": 900},
+        "synthesis": {
+            "type": "string",
+            "description": "Concise evidence synthesis of at most 100 words.",
+        },
         "source_ids": {
             "type": "array",
             "maxItems": 10,
@@ -88,7 +91,10 @@ FINDING_SCHEMA: dict[str, Any] = {
 REPORT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "executive_summary": {"type": "string", "maxLength": 1_600},
+        "executive_summary": {
+            "type": "string",
+            "description": "Direct answer to the query in at most 200 words.",
+        },
         "main_findings": {
             "type": "array",
             "maxItems": 8,
@@ -103,7 +109,10 @@ REPORT_SCHEMA: dict[str, Any] = {
         "remaining_gaps": {
             "type": "array",
             "maxItems": 6,
-            "items": {"type": "string", "maxLength": 300},
+            "items": {
+                "type": "string",
+                "description": "One unresolved evidence gap in at most 40 words.",
+            },
         },
     },
     "required": [

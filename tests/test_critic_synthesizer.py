@@ -139,11 +139,11 @@ class CriticSynthesizerTests(unittest.TestCase):
             self.assertEqual(["S1", "S2"], properties["source_ids"]["items"]["enum"])
         self.assertEqual(8, schema["properties"]["main_findings"]["maxItems"])
         self.assertEqual(5, schema["properties"]["weak_evidence"]["maxItems"])
-        self.assertEqual(
-            900,
+        self.assertIn(
+            "at most 100 words",
             schema["properties"]["main_findings"]["items"]["properties"][
                 "synthesis"
-            ]["maxLength"],
+            ]["description"],
         )
 
     def test_report_rejects_output_over_word_ceiling(self) -> None:
