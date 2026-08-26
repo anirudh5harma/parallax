@@ -13,6 +13,8 @@ export type SessionStatus =
   | 'failed'
   | 'rejected';
 
+export type ResearchMode = 'fast' | 'deep';
+
 export type Branch = {
   parent_session_id: string;
   claim_id: string;
@@ -27,6 +29,14 @@ export type SessionSummary = {
   query: string;
   title: string;
   created_at: string;
+  mode: ResearchMode;
+  budget_limits: {
+    max_searches: number;
+    max_sources: number;
+    max_pages: number;
+    max_followup_tasks: number;
+    wall_clock_timeout_seconds: number;
+  };
   status: SessionStatus;
   parent_session_id: string | null;
   branch: Branch | null;
@@ -289,10 +299,10 @@ export const api = {
   health: () => request<{ status: string; configured: boolean; model: string }>('/api/health'),
   sessions: () => request<SessionSummary[]>('/api/sessions'),
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
-  create: (query: string) =>
+  create: (query: string, mode: ResearchMode) =>
     request<SessionSummary>('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, mode }),
     }),
   start: (id: string) =>
     request<SessionSummary>(`/api/sessions/${id}/start`, {

@@ -6,6 +6,43 @@ from deep_research.domain.budget import BudgetConfig, BudgetExceeded, BudgetMana
 
 
 class BudgetManagerTests(unittest.TestCase):
+    def test_interactive_profiles_preserve_breadth_with_distinct_read_budgets(self) -> None:
+        fast = BudgetConfig.fast()
+        deep = BudgetConfig.deep()
+
+        self.assertEqual((600, 220, 1, 900), (
+            fast.max_sources,
+            fast.max_pages,
+            fast.max_followup_tasks,
+            fast.wall_clock_timeout_seconds,
+        ))
+        self.assertEqual((800, 400, 2, 1200), (
+            deep.max_sources,
+            deep.max_pages,
+            deep.max_followup_tasks,
+            deep.wall_clock_timeout_seconds,
+        ))
+
+    def test_source_screening_ceiling_is_atomic(self) -> None:
+        budget = BudgetManager(BudgetConfig(max_sources=3))
+        outcomes: list[bool] = []
+
+        def reserve() -> None:
+            try:
+                budget.reserve_source()
+                outcomes.append(True)
+            except BudgetExceeded:
+                outcomes.append(False)
+
+        threads = [threading.Thread(target=reserve) for _ in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(3, sum(outcomes))
+        self.assertEqual(3, budget.snapshot().sources)
+
     def test_search_ceiling_is_atomic(self) -> None:
         budget = BudgetManager(BudgetConfig(max_searches=3))
         outcomes: list[bool] = []

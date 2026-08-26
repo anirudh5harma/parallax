@@ -7,6 +7,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -113,6 +114,7 @@ def _environment_set(name: str, defaults: set[str]) -> set[str]:
 
 class ResearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=4_000)
+    mode: Literal["fast", "deep"] = "fast"
 
 
 class BranchRequest(BaseModel):
@@ -207,7 +209,11 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
             client_id = _client_id(http_request)
             quota.reserve(workspace_id, "plan", client_id=client_id)
             try:
-                session = sessions.create(request.query, workspace_id=workspace_id)
+                session = sessions.create(
+                    request.query,
+                    workspace_id=workspace_id,
+                    mode=request.mode,
+                )
             except Exception:
                 quota.refund(workspace_id, "plan", client_id=client_id)
                 raise

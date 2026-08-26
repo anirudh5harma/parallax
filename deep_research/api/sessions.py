@@ -11,6 +11,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ MAX_ACTIVE_SESSIONS = 2
 MAX_SSE_CONNECTIONS = 8
 MAX_SSE_CONNECTIONS_PER_CLIENT = 2
 SESSION_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
+RESEARCH_MODES = {"fast", "deep"}
 
 
 class SessionCapacityError(RuntimeError):
@@ -45,6 +47,8 @@ class ResearchSession:
     query: str
     title: str
     created_at: str
+    mode: str = "fast"
+    budget_limits: dict[str, int | float] = field(default_factory=dict)
     workspace_id: str = "local"
     status: str = "planning"
     parent_session_id: str | None = None
@@ -150,6 +154,8 @@ class ResearchSession:
                 "query": self.query,
                 "title": self.title,
                 "created_at": self.created_at,
+                "mode": self.mode,
+                "budget_limits": dict(self.budget_limits),
                 "status": self.status,
                 "parent_session_id": self.parent_session_id,
                 "branch": self.branch,
@@ -243,6 +249,7 @@ class ResearchSessionService:
         *,
         output_root: Path = Path("runs/web"),
         config: BudgetConfig | None = None,
+        configs: Mapping[str, BudgetConfig] | None = None,
         model_id: str | None = None,
         auto_start: bool = True,
         max_active_sessions: int = MAX_ACTIVE_SESSIONS,
@@ -250,7 +257,20 @@ class ResearchSessionService:
         max_sse_connections: int = MAX_SSE_CONNECTIONS,
     ) -> None:
         self.output_root = output_root.resolve()
-        self.config = config or BudgetConfig()
+        if config is not None and configs is not None:
+            raise ValueError("provide config or configs, not both")
+        if configs is not None:
+            if set(configs) != RESEARCH_MODES:
+                raise ValueError("configs must define fast and deep research modes")
+            self.configs = dict(configs)
+        elif config is not None:
+            self.configs = dict.fromkeys(RESEARCH_MODES, config)
+        else:
+            self.configs = {
+                "fast": BudgetConfig.fast(),
+                "deep": BudgetConfig.deep(),
+            }
+        self.config = self.configs["fast"]
         self.model_id = model_id or os.environ.get(
             "BEDROCK_WEB_MODEL_ID", DEFAULT_BEDROCK_MODEL
         )
@@ -307,6 +327,7 @@ class ResearchSessionService:
         workspace_id: str = "local",
         parent_session_id: str | None = None,
         branch: dict[str, str] | None = None,
+        mode: str = "fast",
     ) -> ResearchSession:
         try:
             query.encode("utf-8", errors="strict")
@@ -323,11 +344,22 @@ class ResearchSessionService:
             raise ValueError("research query must contain at least 3 characters")
         if len(normalized) > 4_000:
             raise ValueError("research query must not exceed 4000 characters")
+        if mode not in RESEARCH_MODES:
+            raise ValueError("research mode must be fast or deep")
+        config = self.configs[mode]
         session = ResearchSession(
             id=uuid.uuid4().hex,
             query=normalized,
             title=_session_title(normalized, branch),
             created_at=datetime.now(UTC).isoformat(),
+            mode=mode,
+            budget_limits={
+                "max_searches": config.max_searches,
+                "max_sources": config.max_sources,
+                "max_pages": config.max_pages,
+                "max_followup_tasks": config.max_followup_tasks,
+                "wall_clock_timeout_seconds": config.wall_clock_timeout_seconds,
+            },
             workspace_id=workspace_id,
             parent_session_id=parent_session_id,
             branch=branch,
@@ -500,6 +532,7 @@ class ResearchSessionService:
                 workspace_id=parent.workspace_id,
                 parent_session_id=parent_id,
                 branch=branch,
+                mode=parent.mode,
             )
         finally:
             self._release_session_pin(parent_id)
@@ -518,6 +551,7 @@ class ResearchSessionService:
             return
         process: subprocess.Popen | None = None
         try:
+            config = self.configs[session.mode]
             session_root = self.output_root / session.id
             session_root.mkdir(parents=True, exist_ok=False, mode=0o700)
             plan_path = session_root / "plan.json"
@@ -532,20 +566,24 @@ class ResearchSessionService:
                 "--model",
                 self.model_id,
                 "--max-searches",
-                str(self.config.max_searches),
+                str(config.max_searches),
+                "--max-sources",
+                str(config.max_sources),
                 "--max-pages",
-                str(self.config.max_pages),
+                str(config.max_pages),
+                "--max-followup-tasks",
+                str(config.max_followup_tasks),
                 "--max-concurrent-fetches",
-                str(self.config.max_concurrent_fetches),
+                str(config.max_concurrent_fetches),
                 "--timeout",
-                str(self.config.wall_clock_timeout_seconds),
+                str(config.wall_clock_timeout_seconds),
                 "--plan-only",
                 "--plan-output",
                 str(plan_path),
             ]
             environment = os.environ.copy()
             environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(
-                worker_timeout(self.config.wall_clock_timeout_seconds)
+                worker_timeout(config.wall_clock_timeout_seconds)
             )
             process = _start_worker(
                 command,
@@ -555,7 +593,7 @@ class ResearchSessionService:
             with self._lock:
                 self._processes[session.id] = process
             try:
-                process.wait(timeout=self.config.wall_clock_timeout_seconds)
+                process.wait(timeout=config.wall_clock_timeout_seconds)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
@@ -596,6 +634,7 @@ class ResearchSessionService:
             return
         process: subprocess.Popen | None = None
         try:
+            config = self.configs[session.mode]
             session_root = self.output_root / session.id
             session_root.mkdir(parents=True, exist_ok=True, mode=0o700)
             plan_path = session_root / "plan.json"
@@ -613,19 +652,23 @@ class ResearchSessionService:
                 "--model",
                 self.model_id,
                 "--max-searches",
-                str(self.config.max_searches),
+                str(config.max_searches),
+                "--max-sources",
+                str(config.max_sources),
                 "--max-pages",
-                str(self.config.max_pages),
+                str(config.max_pages),
+                "--max-followup-tasks",
+                str(config.max_followup_tasks),
                 "--max-concurrent-fetches",
-                str(self.config.max_concurrent_fetches),
+                str(config.max_concurrent_fetches),
                 "--timeout",
-                str(self.config.wall_clock_timeout_seconds),
+                str(config.wall_clock_timeout_seconds),
                 "--approved-plan",
                 str(plan_path),
             ]
             environment = os.environ.copy()
             environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(
-                worker_timeout(self.config.wall_clock_timeout_seconds)
+                worker_timeout(config.wall_clock_timeout_seconds)
             )
             with session.lock:
                 session.status = "running"
@@ -648,7 +691,7 @@ class ResearchSessionService:
                 event_path, event_offset = self._drain_events(
                     session, session_root, event_path, event_offset
                 )
-                if time.monotonic() - started >= self.config.wall_clock_timeout_seconds:
+                if time.monotonic() - started >= config.wall_clock_timeout_seconds:
                     process.kill()
                     process.wait()
                     self._fail(session, "wall-clock timeout exhausted; worker terminated")

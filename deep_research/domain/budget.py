@@ -8,6 +8,7 @@ MAX_PRIMARY_TASKS = 4
 MAX_FOLLOWUP_TASKS = 2
 MAX_RESEARCH_TASKS = 6
 MAX_SEARCHES = 150
+MAX_SOURCES = 1_000
 MAX_PAGES = 600
 MAX_CONCURRENT_FETCHES = 12
 MAX_DEPTH = 1
@@ -24,6 +25,7 @@ class BudgetConfig:
     max_followup_tasks: int = 2
     max_research_tasks: int = 6
     max_searches: int = 24
+    max_sources: int = 80
     max_pages: int = 40
     max_concurrent_fetches: int = 8
     max_depth: int = 1
@@ -35,6 +37,7 @@ class BudgetConfig:
             "max_followup_tasks": (self.max_followup_tasks, 0, MAX_FOLLOWUP_TASKS),
             "max_research_tasks": (self.max_research_tasks, 1, MAX_RESEARCH_TASKS),
             "max_searches": (self.max_searches, 1, MAX_SEARCHES),
+            "max_sources": (self.max_sources, 1, MAX_SOURCES),
             "max_pages": (self.max_pages, 1, MAX_PAGES),
             "max_concurrent_fetches": (
                 self.max_concurrent_fetches,
@@ -55,9 +58,33 @@ class BudgetConfig:
             raise ValueError("task class ceilings exceed max_research_tasks")
 
     @classmethod
-    def serious(cls) -> BudgetConfig:
+    def fast(cls) -> BudgetConfig:
+        return cls(
+            max_followup_tasks=1,
+            max_research_tasks=5,
+            max_searches=64,
+            max_sources=600,
+            max_pages=220,
+            max_concurrent_fetches=12,
+            wall_clock_timeout_seconds=900,
+        )
+
+    @classmethod
+    def deep(cls) -> BudgetConfig:
         return cls(
             max_searches=100,
+            max_sources=800,
+            max_pages=400,
+            max_concurrent_fetches=12,
+            wall_clock_timeout_seconds=1200,
+        )
+
+    @classmethod
+    def serious(cls) -> BudgetConfig:
+        """Legacy exhaustive CLI profile retained for compatibility."""
+        return cls(
+            max_searches=100,
+            max_sources=800,
             max_pages=600,
             max_concurrent_fetches=12,
             wall_clock_timeout_seconds=1800,
@@ -69,6 +96,7 @@ class BudgetSnapshot:
     primary_tasks: int
     followup_tasks: int
     searches: int
+    sources: int
     pages: int
     elapsed_seconds: float
 
@@ -86,6 +114,7 @@ class BudgetManager:
         self._primary_tasks = 0
         self._followup_tasks = 0
         self._searches = 0
+        self._sources = 0
         self._pages = 0
         self._lock = threading.Lock()
 
@@ -119,6 +148,9 @@ class BudgetManager:
     def reserve_search(self) -> None:
         self._reserve("_searches", self.config.max_searches, "search")
 
+    def reserve_source(self) -> None:
+        self._reserve("_sources", self.config.max_sources, "source screening")
+
     def reserve_page(self) -> None:
         self._reserve("_pages", self.config.max_pages, "page")
 
@@ -136,6 +168,7 @@ class BudgetManager:
                 primary_tasks=self._primary_tasks,
                 followup_tasks=self._followup_tasks,
                 searches=self._searches,
+                sources=self._sources,
                 pages=self._pages,
                 elapsed_seconds=time.monotonic() - self._started,
             )

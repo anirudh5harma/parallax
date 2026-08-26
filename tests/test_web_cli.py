@@ -12,44 +12,60 @@ from deep_research.web_cli import main
 
 
 class WebCliTests(unittest.TestCase):
-    def test_defaults_to_serious_web_profile(self) -> None:
+    def test_defaults_to_fast_and_deep_web_profiles(self) -> None:
         with patch("deep_research.web_cli.uvicorn.run") as run:
             result = main([])
 
-        config = run.call_args.args[0].state.sessions.config
+        configs = run.call_args.args[0].state.sessions.configs
         self.assertEqual(0, result)
-        self.assertEqual(100, config.max_searches)
-        self.assertEqual(600, config.max_pages)
-        self.assertEqual(12, config.max_concurrent_fetches)
-        self.assertEqual(1800, config.wall_clock_timeout_seconds)
+        self.assertEqual((64, 600, 220, 900), (
+            configs["fast"].max_searches,
+            configs["fast"].max_sources,
+            configs["fast"].max_pages,
+            configs["fast"].wall_clock_timeout_seconds,
+        ))
+        self.assertEqual((100, 800, 400, 1200), (
+            configs["deep"].max_searches,
+            configs["deep"].max_sources,
+            configs["deep"].max_pages,
+            configs["deep"].wall_clock_timeout_seconds,
+        ))
 
     def test_forwards_bounded_budget_controls(self) -> None:
         with patch("deep_research.web_cli.uvicorn.run") as run:
             result = main([
-                "--port", "8123", "--max-searches", "7", "--max-pages", "9",
-                "--max-concurrent-fetches", "3", "--timeout", "42",
+                "--port", "8123", "--fast-max-searches", "7",
+                "--fast-max-sources", "11", "--fast-max-pages", "9",
+                "--deep-max-searches", "13", "--deep-max-sources", "17",
+                "--deep-max-pages", "15", "--max-concurrent-fetches", "3",
+                "--timeout", "42", "--deep-timeout", "84",
             ])
 
         app = run.call_args.args[0]
-        config = app.state.sessions.config
+        fast = app.state.sessions.configs["fast"]
+        deep = app.state.sessions.configs["deep"]
         self.assertEqual(0, result)
-        self.assertEqual(7, config.max_searches)
-        self.assertEqual(9, config.max_pages)
-        self.assertEqual(3, config.max_concurrent_fetches)
-        self.assertEqual(42, config.wall_clock_timeout_seconds)
+        self.assertEqual((7, 11, 9, 3, 42), (
+            fast.max_searches, fast.max_sources, fast.max_pages,
+            fast.max_concurrent_fetches, fast.wall_clock_timeout_seconds,
+        ))
+        self.assertEqual((13, 17, 15, 3, 84), (
+            deep.max_searches, deep.max_sources, deep.max_pages,
+            deep.max_concurrent_fetches, deep.wall_clock_timeout_seconds,
+        ))
         self.assertEqual("127.0.0.1", run.call_args.kwargs["host"])
         self.assertEqual(8123, run.call_args.kwargs["port"])
 
     def test_invalid_budget_never_starts_server(self) -> None:
         with patch("deep_research.web_cli.uvicorn.run") as run:
             with self.assertRaises(SystemExit):
-                main(["--max-pages", "601"])
+                main(["--deep-max-pages", "601"])
 
         run.assert_not_called()
 
     def test_worker_receives_every_configured_ceiling(self) -> None:
         config = BudgetConfig(
-            max_searches=7, max_pages=9, max_concurrent_fetches=3,
+            max_searches=7, max_sources=8, max_pages=9, max_concurrent_fetches=3,
             wall_clock_timeout_seconds=42,
         )
 
@@ -87,6 +103,7 @@ class WebCliTests(unittest.TestCase):
         command = popen.call_args.args[0]
         environment = popen.call_args.kwargs["env"]
         self.assertEqual("7", command[command.index("--max-searches") + 1])
+        self.assertEqual("8", command[command.index("--max-sources") + 1])
         self.assertEqual("9", command[command.index("--max-pages") + 1])
         self.assertEqual(
             "3", command[command.index("--max-concurrent-fetches") + 1]

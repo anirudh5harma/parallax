@@ -30,14 +30,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("query", help="Research question")
     parser.add_argument(
         "--profile",
-        choices=("dev", "serious"),
+        choices=("dev", "fast", "deep", "serious"),
         default="dev",
         help="Budget preset (default: dev)",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("runs"))
     parser.add_argument("--model", default=None, help="Model override")
     parser.add_argument("--max-searches", type=int, default=None)
+    parser.add_argument("--max-sources", type=int, default=None)
     parser.add_argument("--max-pages", type=int, default=None)
+    parser.add_argument("--max-followup-tasks", type=int, default=None)
     parser.add_argument("--max-concurrent-fetches", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=None, help="Wall-clock seconds")
     parser.add_argument("--debug", action="store_true")
@@ -48,10 +50,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> BudgetConfig:
-    config = BudgetConfig.serious() if args.profile == "serious" else BudgetConfig()
+    profiles = {
+        "dev": BudgetConfig,
+        "fast": BudgetConfig.fast,
+        "deep": BudgetConfig.deep,
+        "serious": BudgetConfig.serious,
+    }
+    config = profiles[args.profile]()
     replacements = {
         "max_searches": args.max_searches,
+        "max_sources": args.max_sources,
         "max_pages": args.max_pages,
+        "max_followup_tasks": args.max_followup_tasks,
         "max_concurrent_fetches": args.max_concurrent_fetches,
         "wall_clock_timeout_seconds": args.timeout,
     }

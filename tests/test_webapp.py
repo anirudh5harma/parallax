@@ -17,6 +17,48 @@ WORKSPACE_B = "b" * 32
 
 
 class LocalApiBoundaryTests(unittest.TestCase):
+    def test_session_creation_accepts_research_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {
+                "AWS_BEARER_TOKEN_BEDROCK": "key",
+                "TAVILY_API_KEY": "key",
+            },
+            clear=False,
+        ):
+            service = ResearchSessionService(output_root=Path(tmp), auto_start=False)
+            client = TestClient(create_app(service))
+            response = client.post(
+                "/api/sessions",
+                headers={"X-Workspace-Key": WORKSPACE_A},
+                json={"query": "A bounded research question", "mode": "deep"},
+            )
+
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("deep", response.json()["mode"])
+        self.assertEqual(800, response.json()["budget_limits"]["max_sources"])
+        self.assertEqual(400, response.json()["budget_limits"]["max_pages"])
+
+    def test_session_creation_rejects_unknown_research_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {
+                "AWS_BEARER_TOKEN_BEDROCK": "key",
+                "TAVILY_API_KEY": "key",
+            },
+            clear=False,
+        ):
+            client = TestClient(
+                create_app(ResearchSessionService(output_root=Path(tmp), auto_start=False))
+            )
+            response = client.post(
+                "/api/sessions",
+                headers={"X-Workspace-Key": WORKSPACE_A},
+                json={"query": "A bounded research question", "mode": "exhaustive"},
+            )
+
+        self.assertEqual(422, response.status_code)
+
     def test_rejects_untrusted_host_and_origin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = ResearchSessionService(

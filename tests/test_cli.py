@@ -21,6 +21,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(600, config.max_pages)
         self.assertEqual(12, config.max_concurrent_fetches)
 
+    def test_fast_and_deep_profiles_are_selectable(self) -> None:
+        fast = config_from_args(build_parser().parse_args(["Query", "--profile", "fast"]))
+        deep = config_from_args(build_parser().parse_args(["Query", "--profile", "deep"]))
+
+        self.assertEqual(220, fast.max_pages)
+        self.assertEqual(600, fast.max_sources)
+        self.assertEqual(400, deep.max_pages)
+        self.assertEqual(800, deep.max_sources)
+
     def test_override_cannot_exceed_absolute_guard(self) -> None:
         args = build_parser().parse_args(["Query", "--max-pages", "601"])
         with self.assertRaises(ValueError):
