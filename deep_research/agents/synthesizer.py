@@ -198,14 +198,14 @@ def build_synthesis_context(
     )
 
 
-def repair_report_citations(
+def detect_invalid_report_citations(
     payload: dict[str, object],
     context: SynthesisContext,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
-    repaired = deepcopy(payload)
-    repairs: list[dict[str, object]] = []
+    inspected = deepcopy(payload)
+    violations: list[dict[str, object]] = []
     for section in ("main_findings", "contested_findings", "weak_evidence"):
-        items = repaired.get(section, [])
+        items = inspected.get(section, [])
         if not isinstance(items, list):
             continue
         for item in items:
@@ -218,39 +218,17 @@ def repair_report_citations(
                 not isinstance(source_id, str) for source_id in source_ids
             ):
                 continue
-            removed = set(source_ids) - allowed
-            valid_source_ids = set(source_ids) & allowed
+            invalid = set(source_ids) - allowed
             synthesis = str(item.get("synthesis", ""))
-
-            def replace_citation(
-                match: re.Match[str],
-                *,
-                allowed_sources: set[str] = allowed,
-                valid_sources: set[str] = valid_source_ids,
-                removed_sources: set[str] = removed,
-            ) -> str:
-                source_id = match.group(1)
-                if source_id in allowed_sources:
-                    valid_sources.add(source_id)
-                    return match.group(0)
-                removed_sources.add(source_id)
-                return ""
-
-            synthesis = re.sub(r"\[\s*(S\d+)\s*\]", replace_citation, synthesis)
-            synthesis = re.sub(r"\(\s*\)|\[\s*\]", "", synthesis)
-            item["synthesis"] = " ".join(synthesis.split())
-            item["source_ids"] = sorted(
-                valid_source_ids,
-                key=lambda source_id: int(source_id[1:]),
-            )
-            if removed:
-                repairs.append(
+            invalid.update(_inline_source_ids(synthesis) - allowed)
+            if invalid:
+                violations.append(
                     {
                         "claim_id": claim_id,
-                        "removed_source_count": len(removed),
+                        "invalid_source_count": len(invalid),
                     }
                 )
-    return repaired, repairs
+    return inspected, violations
 
 
 def build_fallback_report_payload(

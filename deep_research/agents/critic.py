@@ -18,8 +18,8 @@ from .synthesizer import (
     build_fallback_report_payload,
     build_synthesis_context,
     contextualize_remaining_gaps,
+    detect_invalid_report_citations,
     render_report,
-    repair_report_citations,
 )
 
 
@@ -438,9 +438,12 @@ class CriticSynthesizer:
             )
         except (ProviderError, BudgetExceeded) as exc:
             return complete(render_fallback(exc))
-        payload, citation_repairs = repair_report_citations(payload, context)
-        if citation_repairs:
-            self.audit.log("synthesis.citations_repaired", repairs=citation_repairs)
+        payload, citation_violations = detect_invalid_report_citations(payload, context)
+        if citation_violations:
+            self.audit.log(
+                "synthesis.citations_invalid",
+                violations=citation_violations,
+            )
         try:
             report = render_report(payload, context, remaining_gaps=synthesis_gaps)
         except ValueError as exc:
@@ -467,9 +470,12 @@ class CriticSynthesizer:
                 )
             except (ProviderError, BudgetExceeded) as retry_error:
                 return complete(render_fallback(retry_error))
-            payload, citation_repairs = repair_report_citations(payload, context)
-            if citation_repairs:
-                self.audit.log("synthesis.citations_repaired", repairs=citation_repairs)
+            payload, citation_violations = detect_invalid_report_citations(payload, context)
+            if citation_violations:
+                self.audit.log(
+                    "synthesis.citations_invalid",
+                    violations=citation_violations,
+                )
             try:
                 report = render_report(payload, context, remaining_gaps=synthesis_gaps)
             except ValueError as final_error:

@@ -796,7 +796,7 @@ class CriticSynthesizerTests(unittest.TestCase):
         self.assertNotIn("S99", report)
         self.assertIn("- Sources: S1", report)
 
-    def test_synthesis_repairs_cross_claim_citation(self) -> None:
+    def test_synthesis_rejects_cross_claim_citation(self) -> None:
         model = FakeModel({})
         with tempfile.TemporaryDirectory() as tmp:
             audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
@@ -849,7 +849,9 @@ class CriticSynthesizerTests(unittest.TestCase):
             )
 
         self.assertIn("- Sources: S1", report)
-        self.assertNotIn("S2", report)
+        claim_section = report.split("### X improves Y.", 1)[1].split("###", 1)[0]
+        self.assertNotIn("S2", claim_section)
+        self.assertNotIn("Wrongly cites another claim", report)
 
     def test_synthesis_repairs_one_invalid_citation_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1032,8 +1034,8 @@ class CriticSynthesizerTests(unittest.TestCase):
                 "main_findings": [
                     {
                         "claim_id": first_claim.claim_id,
-                        "synthesis": "Evidence supports this finding [S2].",
-                        "source_ids": ["S2"],
+                        "synthesis": "Z improves Q [S2].",
+                        "source_ids": ["S1"],
                     }
                 ],
                 "contested_findings": [],
@@ -1052,6 +1054,7 @@ class CriticSynthesizerTests(unittest.TestCase):
         claim_section = report.split("### X improves Y.", 1)[1].split("###", 1)[0]
         self.assertIn("- Sources: S1", claim_section)
         self.assertNotIn("- Sources: S2", claim_section)
+        self.assertNotIn("Z improves Q", claim_section)
 
     def test_synthesis_fallback_removes_unbound_summary_citation(self) -> None:
         model = FakeModel({})

@@ -215,6 +215,79 @@ class ResearchSessionServiceTests(unittest.TestCase):
             self.assertEqual("queued", first.status)
             self.assertEqual("ready", second.status)
 
+    def test_start_lookup_and_ready_transition_are_one_atomic_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), auto_start=False, max_retained_sessions=1
+            )
+            session = service.create("First bounded query")
+            session.mark_ready([{"id": f"T{index}"} for index in range(1, 5)])
+
+            with patch.object(
+                service,
+                "get",
+                side_effect=AssertionError("start must not release the service lock"),
+            ), patch("deep_research.api.sessions.threading.Thread"):
+                service.start(session.id)
+
+        self.assertEqual("queued", session.status)
+        self.assertEqual([session.id], [item["id"] for item in service.list_sessions()])
+
+    def test_branch_pins_parent_against_concurrent_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ResearchSessionService(
+                output_root=Path(tmp), auto_start=False, max_retained_sessions=2
+            )
+            parent = service.create("Parent research")
+            parent.status = "completed"
+            parent.ledger = ledger()
+            sibling = service.create("Older sibling research")
+            sibling.status = "completed"
+            entered = threading.Event()
+            release = threading.Event()
+            errors: list[Exception] = []
+            original_evidence_view = evidence_view
+
+            def blocked_evidence_view(value: dict[str, object] | None):
+                entered.set()
+                self.assertTrue(release.wait(timeout=2))
+                return original_evidence_view(value)
+
+            def create_branch() -> None:
+                try:
+                    service.create_branch(parent.id, "O2")
+                except Exception as exc:
+                    errors.append(exc)
+
+            with patch(
+                "deep_research.api.sessions.evidence_view",
+                side_effect=blocked_evidence_view,
+            ):
+                branch_thread = threading.Thread(target=create_branch)
+                branch_thread.start()
+                self.assertTrue(entered.wait(timeout=2))
+                concurrent = service.create("Concurrent research")
+                release.set()
+                branch_thread.join(timeout=2)
+
+        retained = {item["id"] for item in service.list_sessions()}
+        self.assertFalse(branch_thread.is_alive())
+        self.assertIn(parent.id, retained)
+        self.assertIn(concurrent.id, retained)
+        self.assertNotIn(sibling.id, retained)
+        self.assertTrue(any(isinstance(error, SessionCapacityError) for error in errors))
+
+    def test_process_cleanup_cannot_unregister_newer_phase(self) -> None:
+        service = ResearchSessionService(auto_start=False)
+        planner_process = object()
+        run_process = object()
+        service._processes["session"] = run_process
+
+        service._unregister_process("session", planner_process)  # type: ignore[arg-type]
+
+        self.assertIs(run_process, service._processes["session"])
+        service._processes.clear()
+
     def test_event_retention_is_bounded_with_monotonic_ids(self) -> None:
         session = ResearchSession(
             id="session", query="query", title="title", created_at="now"
