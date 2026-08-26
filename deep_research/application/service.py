@@ -13,13 +13,15 @@ from ..agents.researcher import FetchGate, Researcher
 from ..domain.budget import BudgetConfig, BudgetManager
 from ..domain.ledger import EvidenceLedger
 from ..domain.models import (
+    EvidenceObservation,
+    Polarity,
     Priority,
     ResearchResult,
     ResearchTask,
     TaskStatus,
     to_primitive,
 )
-from ..domain.urls import UrlRegistry
+from ..domain.urls import UrlRegistry, normalize_url
 from ..infrastructure.audit import JsonlAuditLogger
 from ..infrastructure.providers import (
     BatchPageExtractor,
@@ -53,6 +55,7 @@ def run_query(
     fetcher: PageFetcher,
     batch_extractor: BatchPageExtractor | None = None,
     approved_tasks: list[ResearchTask] | None = None,
+    seed_observations: list[EvidenceObservation] | None = None,
 ) -> RunArtifacts:
     if not query.strip():
         raise ValueError("research query must not be empty")
@@ -69,6 +72,14 @@ def run_query(
     budget = BudgetManager(config)
     ledger = EvidenceLedger(audit)
     urls = UrlRegistry()
+    seeds = list(seed_observations or [])
+    if seeds:
+        ledger.add_observations(seeds)
+        audit.log(
+            "ledger.seed_loaded",
+            observation_count=len(seeds),
+            source_count=len({item.source_url for item in seeds}),
+        )
     pipeline = ResearchPipeline(
         planner=Planner(model, budget, audit),
         researcher=Researcher(
@@ -81,6 +92,7 @@ def run_query(
             fetch_gate=FetchGate(config.max_concurrent_fetches),
             batch_extractor=batch_extractor,
             evidence_batch_size=4 if config.max_pages >= 100 else 1,
+            excluded_urls={normalize_url(item.source_url) for item in seeds},
         ),
         critic=CriticSynthesizer(model, budget, audit),
         ledger=ledger,
@@ -252,6 +264,34 @@ def load_plan(path: Path, expected_query: str) -> list[ResearchTask]:
     if len(tasks) != 4:
         raise ValueError("approved plan must contain exactly four tasks")
     return tasks
+
+
+def load_seed_observations(path: Path) -> list[EvidenceObservation]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_observations = payload.get("observations") if isinstance(payload, dict) else None
+    if not isinstance(raw_observations, list) or len(raw_observations) > 100:
+        raise ValueError("seed evidence is invalid")
+    observations: list[EvidenceObservation] = []
+    for item in raw_observations:
+        if not isinstance(item, dict):
+            raise ValueError("seed evidence observation is invalid")
+        observations.append(
+            EvidenceObservation(
+                observation_id=str(item["observation_id"]),
+                task_id="B0",
+                source_url=str(item["source_url"]),
+                source_domain=str(item["source_domain"]),
+                statement=str(item["statement"]),
+                polarity=Polarity(str(item["polarity"])),
+                excerpt=str(item["excerpt"]),
+                source_type=(
+                    str(item["source_type"])
+                    if item.get("source_type") is not None
+                    else None
+                ),
+            )
+        )
+    return observations
 
 
 def _write_json_atomic(path: Path, value: object) -> None:

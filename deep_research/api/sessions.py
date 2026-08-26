@@ -49,6 +49,7 @@ class ResearchSession:
     created_at: str
     mode: str = "fast"
     budget_limits: dict[str, int | float] = field(default_factory=dict)
+    seed_observations: list[dict[str, Any]] = field(default_factory=list, repr=False)
     workspace_id: str = "local"
     status: str = "planning"
     parent_session_id: str | None = None
@@ -328,6 +329,7 @@ class ResearchSessionService:
         parent_session_id: str | None = None,
         branch: dict[str, str] | None = None,
         mode: str = "fast",
+        seed_observations: list[dict[str, Any]] | None = None,
     ) -> ResearchSession:
         try:
             query.encode("utf-8", errors="strict")
@@ -360,6 +362,7 @@ class ResearchSessionService:
                 "max_followup_tasks": config.max_followup_tasks,
                 "wall_clock_timeout_seconds": config.wall_clock_timeout_seconds,
             },
+            seed_observations=[dict(item) for item in (seed_observations or [])],
             workspace_id=workspace_id,
             parent_session_id=parent_session_id,
             branch=branch,
@@ -516,6 +519,20 @@ class ResearchSessionService:
                 "source_url": str(selected["source_url"]),
                 "claim_text": str(selected_claim["text"]),
             }
+            seed_observations = [
+                {
+                    "observation_id": str(item["observation_id"]),
+                    "task_id": "B0",
+                    "source_url": str(item["source_url"]),
+                    "source_domain": str(item["source_domain"]),
+                    "statement": str(item["statement"]),
+                    "polarity": str(item["polarity"]),
+                    "excerpt": str(item["excerpt"]),
+                    "source_type": item.get("source_type"),
+                }
+                for item in selected_claim["observations"]
+                if isinstance(item, dict)
+            ]
             safe_claim = _branch_text(selected_claim["text"], 180)
             safe_url = _branch_text(selected["source_url"], 500)
             safe_excerpt = _branch_text(selected["excerpt"], 300)
@@ -533,6 +550,7 @@ class ResearchSessionService:
                 parent_session_id=parent_id,
                 branch=branch,
                 mode=parent.mode,
+                seed_observations=seed_observations,
             )
         finally:
             self._release_session_pin(parent_id)
@@ -678,6 +696,13 @@ class ResearchSessionService:
                 "--approved-plan",
                 str(plan_path),
             ]
+            if session.seed_observations:
+                seed_path = session_root / "seed-evidence.json"
+                _write_private_json(
+                    seed_path,
+                    {"observations": session.seed_observations},
+                )
+                command.extend(["--seed-evidence", str(seed_path)])
             environment = os.environ.copy()
             environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"] = str(
                 worker_timeout(config.wall_clock_timeout_seconds)
@@ -923,6 +948,19 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
     value = json.loads(path.read_text(encoding="utf-8"))
     return value if isinstance(value, dict) else {}
+
+
+def _write_private_json(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(value, stream, ensure_ascii=False, sort_keys=True)
+        stream.write("\n")
+    temporary.replace(path)
 
 
 def _start_worker(

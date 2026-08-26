@@ -8,7 +8,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from .application.runtime import worker_script_path, worker_timeout
-from .application.service import create_plan, load_plan, run_query
+from .application.service import (
+    create_plan,
+    load_plan,
+    load_seed_observations,
+    run_query,
+)
 from .domain.budget import BudgetConfig
 from .infrastructure.providers import (
     BedrockConverseModel,
@@ -48,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--plan-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--plan-output", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--approved-plan", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--seed-evidence", type=Path, default=None, help=argparse.SUPPRESS)
     return parser
 
 
@@ -174,6 +180,11 @@ def worker_main(argv: list[str] | None = None) -> int:
             approved_tasks=(
                 load_plan(args.approved_plan, args.query)
                 if args.approved_plan is not None
+                else None
+            ),
+            seed_observations=(
+                load_seed_observations(args.seed_evidence)
+                if args.seed_evidence is not None
                 else None
             ),
         )

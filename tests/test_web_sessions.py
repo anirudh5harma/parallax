@@ -450,7 +450,10 @@ class ResearchSessionServiceTests(unittest.TestCase):
                 output_root=Path(tmp),
                 auto_start=False,
             )
-            parent = service.create("Does intervention X improve outcome Y?")
+            parent = service.create(
+                "Does intervention X improve outcome Y?",
+                mode="deep",
+            )
             parent.status = "completed"
             parent.ledger = ledger()
 
@@ -459,6 +462,11 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertEqual(parent.id, child.parent_session_id)
         self.assertEqual("O2", child.branch["observation_id"])
         self.assertEqual("S1", child.branch["source_id"])
+        self.assertEqual("deep", child.mode)
+        self.assertEqual(2, len(child.seed_observations))
+        self.assertEqual({"B0"}, {
+            item["task_id"] for item in child.seed_observations
+        })
         self.assertIn("independent corroboration", child.query)
         self.assertIn("Do not assume", child.query)
 

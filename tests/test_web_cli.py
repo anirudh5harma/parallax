@@ -80,7 +80,19 @@ class WebCliTests(unittest.TestCase):
             service = ResearchSessionService(
                 output_root=Path(tmp), config=config, auto_start=False
             )
-            session = service.create("Bounded worker forwarding")
+            session = service.create(
+                "Bounded worker forwarding",
+                seed_observations=[{
+                    "observation_id": "Oseed",
+                    "task_id": "B0",
+                    "source_url": "https://parent.example/evidence",
+                    "source_domain": "parent.example",
+                    "statement": "Seed statement.",
+                    "polarity": "support",
+                    "excerpt": "Seed excerpt.",
+                    "source_type": "paper",
+                }],
+            )
             session_root = Path(tmp) / session.id
             session_root.mkdir()
             (session_root / "plan.json").write_text(
@@ -99,8 +111,10 @@ class WebCliTests(unittest.TestCase):
                 ) as popen,
             ):
                 service._run(session)
+            command = popen.call_args.args[0]
+            seed_path = Path(command[command.index("--seed-evidence") + 1])
+            seed_payload = json.loads(seed_path.read_text())
 
-        command = popen.call_args.args[0]
         environment = popen.call_args.kwargs["env"]
         self.assertEqual("7", command[command.index("--max-searches") + 1])
         self.assertEqual("8", command[command.index("--max-sources") + 1])
@@ -115,6 +129,7 @@ class WebCliTests(unittest.TestCase):
             "3", command[command.index("--max-concurrent-fetches") + 1]
         )
         self.assertEqual("42", command[command.index("--timeout") + 1])
+        self.assertEqual("Oseed", seed_payload["observations"][0]["observation_id"])
         self.assertEqual(
             str(_worker_timeout(42)), environment["DEEP_RESEARCH_INTERNAL_TIMEOUT"]
         )

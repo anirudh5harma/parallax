@@ -347,6 +347,7 @@ class Researcher:
         batch_extractor: BatchPageExtractor | None = None,
         results_per_search: int = 15,
         evidence_batch_size: int = 1,
+        excluded_urls: set[str] | None = None,
     ) -> None:
         if not 1 <= evidence_batch_size <= 6:
             raise ValueError("evidence_batch_size must be between 1 and 6")
@@ -360,6 +361,7 @@ class Researcher:
         self.batch_extractor = batch_extractor
         self.results_per_search = results_per_search
         self.evidence_batch_size = evidence_batch_size
+        self.excluded_urls = frozenset(excluded_urls or set())
         self._model_slots = threading.BoundedSemaphore(
             min(4, budget.config.max_concurrent_fetches)
         )
@@ -460,6 +462,15 @@ class Researcher:
                     break
                 self._raise_if_cancelled(cancellation)
                 try:
+                    result_normalized = normalize_url(result.url)
+                    if result_normalized in self.excluded_urls:
+                        self.audit.log(
+                            "page.skipped_seed_source",
+                            task_id=task.id,
+                            url=result.url,
+                            normalized_url=result_normalized,
+                        )
+                        continue
                     claimed, normalized = self.urls.claim_url(result.url)
                 except ValueError as exc:
                     self.audit.log(

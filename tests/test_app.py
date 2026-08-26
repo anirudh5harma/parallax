@@ -162,6 +162,69 @@ class AppTests(unittest.TestCase):
         self.assertEqual(0o700, modes.pop("directory"))
         self.assertEqual({0o600}, set(modes.values()))
 
+    def test_run_seeds_branch_evidence_without_refetching_parent_source(self) -> None:
+        model = FakeModel(
+            {
+                "research_plan": {
+                    "disposition": "researchable",
+                    "reason": "Ready for research.",
+                    "tasks": [
+                        {
+                            "question": f"Question {index}?",
+                            "rationale": f"Rationale {index}",
+                            "priority": "medium",
+                            "page_budget_share": 0.25,
+                        }
+                        for index in range(1, 5)
+                    ],
+                },
+                "search_queries": {
+                    "queries": [{"query_text": "focused query", "rationale": "coverage"}]
+                },
+                "initial_critique": {
+                    "coverage": [],
+                    "contested_claim_ids": [],
+                    "remaining_gaps": [],
+                    "followups": [],
+                },
+                "final_critique": {
+                    "coverage": [],
+                    "contested_claim_ids": [],
+                    "remaining_gaps": [],
+                    "followups": [],
+                },
+                "final_report": lambda prompt: self._report_for_prompt(prompt),
+            }
+        )
+        seed = EvidenceObservation(
+            observation_id="Oseed",
+            task_id="B0",
+            source_url="https://parent.example/evidence",
+            source_domain="parent.example",
+            statement="Parent evidence supports the selected perspective.",
+            polarity=Polarity.SUPPORT,
+            excerpt="Parent evidence supports the selected perspective.",
+            source_type="paper",
+        )
+        search = FakeSearch([
+            SearchResult("https://parent.example/evidence", "Parent evidence")
+        ])
+        fetcher = FakeFetcher()
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = run_query(
+                query="Research the selected perspective",
+                output_root=Path(tmp),
+                config=BudgetConfig(max_pages=4),
+                model=model,
+                search=search,
+                fetcher=fetcher,
+                seed_observations=[seed],
+            )
+            dumped = json.loads(artifacts.ledger_path.read_text())
+
+        self.assertEqual("https://parent.example/evidence", dumped["observations"][0]["source_url"])
+        self.assertEqual(0, fetcher.max_active)
+
     @staticmethod
     def _report_for_prompt(prompt: str) -> dict[str, object]:
         context = json.loads(prompt)
