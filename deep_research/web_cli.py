@@ -11,6 +11,10 @@ from .api.sessions import ResearchSessionService
 from .domain.budget import BudgetConfig
 
 
+def _scaled_reserve(configured: int, baseline: int, reserve: int) -> int:
+    return min(max(0, configured - 1), round(configured * reserve / baseline))
+
+
 def main(argv: list[str] | None = None) -> int:
     fast = BudgetConfig.fast()
     deep = BudgetConfig.deep()
@@ -54,6 +58,16 @@ def main(argv: list[str] | None = None) -> int:
                 max_searches=args.fast_max_searches,
                 max_sources=args.fast_max_sources,
                 max_pages=args.fast_max_pages,
+                followup_source_reserve=_scaled_reserve(
+                    args.fast_max_sources,
+                    fast.max_sources,
+                    fast.followup_source_reserve,
+                ),
+                followup_page_reserve=_scaled_reserve(
+                    args.fast_max_pages,
+                    fast.max_pages,
+                    fast.followup_page_reserve,
+                ),
                 max_concurrent_fetches=args.max_concurrent_fetches,
                 wall_clock_timeout_seconds=args.timeout,
             ),
@@ -61,6 +75,16 @@ def main(argv: list[str] | None = None) -> int:
                 max_searches=args.deep_max_searches,
                 max_sources=args.deep_max_sources,
                 max_pages=args.deep_max_pages,
+                followup_source_reserve=_scaled_reserve(
+                    args.deep_max_sources,
+                    deep.max_sources,
+                    deep.followup_source_reserve,
+                ),
+                followup_page_reserve=_scaled_reserve(
+                    args.deep_max_pages,
+                    deep.max_pages,
+                    deep.followup_page_reserve,
+                ),
                 max_concurrent_fetches=args.max_concurrent_fetches,
                 wall_clock_timeout_seconds=args.deep_timeout,
             ),

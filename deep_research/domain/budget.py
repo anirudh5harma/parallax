@@ -27,6 +27,8 @@ class BudgetConfig:
     max_searches: int = 24
     max_sources: int = 80
     max_pages: int = 40
+    followup_source_reserve: int = 0
+    followup_page_reserve: int = 0
     max_concurrent_fetches: int = 8
     max_depth: int = 1
     wall_clock_timeout_seconds: float = 300.0
@@ -56,6 +58,10 @@ class BudgetConfig:
                 raise ValueError(f"{name} must be between {minimum} and {maximum}")
         if self.max_primary_tasks + self.max_followup_tasks > self.max_research_tasks:
             raise ValueError("task class ceilings exceed max_research_tasks")
+        if not 0 <= self.followup_source_reserve <= self.max_sources:
+            raise ValueError("followup_source_reserve must fit max_sources")
+        if not 0 <= self.followup_page_reserve <= self.max_pages:
+            raise ValueError("followup_page_reserve must fit max_pages")
 
     @classmethod
     def fast(cls) -> BudgetConfig:
@@ -65,6 +71,8 @@ class BudgetConfig:
             max_searches=64,
             max_sources=600,
             max_pages=220,
+            followup_source_reserve=100,
+            followup_page_reserve=35,
             max_concurrent_fetches=12,
             wall_clock_timeout_seconds=900,
         )
@@ -75,6 +83,8 @@ class BudgetConfig:
             max_searches=100,
             max_sources=800,
             max_pages=400,
+            followup_source_reserve=120,
+            followup_page_reserve=60,
             max_concurrent_fetches=12,
             wall_clock_timeout_seconds=1200,
         )
@@ -175,6 +185,9 @@ class BudgetManager:
 
     def remaining_pages(self) -> int:
         return max(0, self.config.max_pages - self.snapshot().pages)
+
+    def remaining_sources(self) -> int:
+        return max(0, self.config.max_sources - self.snapshot().sources)
 
     def remaining_searches(self) -> int:
         return max(0, self.config.max_searches - self.snapshot().searches)

@@ -58,6 +58,7 @@ class ResearchPipeline:
 
         can_follow_up = (
             self.budget.remaining_pages() > 0
+            and self.budget.remaining_sources() > 0
             and self.budget.remaining_searches() > 0
             and self.budget.config.max_depth == 1
         )

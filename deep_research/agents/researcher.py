@@ -390,11 +390,31 @@ class Researcher:
         error_code: str | None = None
         explorations: list[PageExploration] = []
         observations: list[EvidenceObservation] = []
-        page_cap = max(1, math.ceil(self.budget.config.max_pages * task.page_budget_share))
-        source_cap = max(
-            page_cap,
-            math.ceil(self.budget.config.max_sources * task.page_budget_share),
-        )
+        if task.depth == 0:
+            page_pool = (
+                self.budget.config.max_pages
+                - self.budget.config.followup_page_reserve
+            )
+            source_pool = (
+                self.budget.config.max_sources
+                - self.budget.config.followup_source_reserve
+            )
+        else:
+            page_pool = self.budget.config.max_pages
+            source_pool = self.budget.config.max_sources
+        page_cap = max(1, math.ceil(page_pool * task.page_budget_share))
+        source_cap = max(page_cap, math.ceil(source_pool * task.page_budget_share))
+        if task.depth == 1:
+            page_cap = min(page_cap, self.budget.remaining_pages())
+            source_cap = min(source_cap, self.budget.remaining_sources())
+        if page_cap <= 0 or source_cap <= 0:
+            task.status = TaskStatus.SKIPPED
+            return ResearchResult(
+                task_id=task.id,
+                observations=[],
+                explorations=[],
+                errors=["remaining budget is too small for useful follow-up research"],
+            )
         query_target = min(
             15,
             max(3, math.ceil(source_cap / self.results_per_search * 1.25)),

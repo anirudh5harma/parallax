@@ -10,18 +10,28 @@ class BudgetManagerTests(unittest.TestCase):
         fast = BudgetConfig.fast()
         deep = BudgetConfig.deep()
 
-        self.assertEqual((600, 220, 1, 900), (
+        self.assertEqual((600, 220, 100, 35, 1, 900), (
             fast.max_sources,
             fast.max_pages,
+            fast.followup_source_reserve,
+            fast.followup_page_reserve,
             fast.max_followup_tasks,
             fast.wall_clock_timeout_seconds,
         ))
-        self.assertEqual((800, 400, 2, 1200), (
+        self.assertEqual((800, 400, 120, 60, 2, 1200), (
             deep.max_sources,
             deep.max_pages,
+            deep.followup_source_reserve,
+            deep.followup_page_reserve,
             deep.max_followup_tasks,
             deep.wall_clock_timeout_seconds,
         ))
+
+    def test_followup_reserves_must_fit_global_budgets(self) -> None:
+        with self.assertRaisesRegex(ValueError, "followup_source_reserve"):
+            BudgetConfig(max_sources=3, followup_source_reserve=4)
+        with self.assertRaisesRegex(ValueError, "followup_page_reserve"):
+            BudgetConfig(max_pages=3, followup_page_reserve=4)
 
     def test_source_screening_ceiling_is_atomic(self) -> None:
         budget = BudgetManager(BudgetConfig(max_sources=3))

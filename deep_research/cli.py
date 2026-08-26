@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-sources", type=int, default=None)
     parser.add_argument("--max-pages", type=int, default=None)
     parser.add_argument("--max-followup-tasks", type=int, default=None)
+    parser.add_argument("--followup-source-reserve", type=int, default=None)
+    parser.add_argument("--followup-page-reserve", type=int, default=None)
     parser.add_argument("--max-concurrent-fetches", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=None, help="Wall-clock seconds")
     parser.add_argument("--debug", action="store_true")
@@ -62,6 +64,8 @@ def config_from_args(args: argparse.Namespace) -> BudgetConfig:
         "max_sources": args.max_sources,
         "max_pages": args.max_pages,
         "max_followup_tasks": args.max_followup_tasks,
+        "followup_source_reserve": args.followup_source_reserve,
+        "followup_page_reserve": args.followup_page_reserve,
         "max_concurrent_fetches": args.max_concurrent_fetches,
         "wall_clock_timeout_seconds": args.timeout,
     }

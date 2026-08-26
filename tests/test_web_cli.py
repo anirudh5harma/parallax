@@ -106,6 +106,12 @@ class WebCliTests(unittest.TestCase):
         self.assertEqual("8", command[command.index("--max-sources") + 1])
         self.assertEqual("9", command[command.index("--max-pages") + 1])
         self.assertEqual(
+            "0", command[command.index("--followup-source-reserve") + 1]
+        )
+        self.assertEqual(
+            "0", command[command.index("--followup-page-reserve") + 1]
+        )
+        self.assertEqual(
             "3", command[command.index("--max-concurrent-fetches") + 1]
         )
         self.assertEqual("42", command[command.index("--timeout") + 1])

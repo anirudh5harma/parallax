@@ -180,8 +180,10 @@ class CriticSynthesizer:
         try:
             payload = self.model.generate_json(
                 system_prompt=(
-                "You are Critic/Synthesizer, one of exactly three roles. Assess coverage and "
-                "visible disagreement. Emit at most two high-value follow-ups only when allowed. "
+                    "You are Critic/Synthesizer, one of exactly three roles. Assess coverage and "
+                    "visible disagreement. Emit high-value follow-ups only when a high-priority "
+                    "gap or material disagreement could change a headline conclusion. Do not use "
+                    "follow-ups for merely additive detail or to consume remaining budget. "
                 "Do not resolve contradictions silently. contested_claim_ids may include a "
                 "contradiction-only proposition when its evidence directly challenges another "
                 "supported finding despite different wording. Select only genuine, query-relevant "
@@ -356,6 +358,9 @@ class CriticSynthesizer:
             claims,
             observations,
             critic_contested_claim_ids=contested_claim_ids,
+            max_claims=(
+                16 if self.budget.config.followup_page_reserve > 0 else 24
+            ),
         )
         synthesis_gaps = contextualize_remaining_gaps(context, remaining_gaps)
 
