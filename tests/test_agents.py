@@ -163,6 +163,158 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_batched_evidence_preserves_page_attribution_and_literal_excerpts(self) -> None:
+        def batch_evidence(prompt: str) -> dict[str, object]:
+            supplied = json.loads(prompt)["untrusted_pages"]
+            return {
+                "pages": [
+                    {
+                        "page_id": page["page_id"],
+                        "observations": [
+                            {
+                                "statement": f"Finding from {page['page_id']}",
+                                "claim_frame_id": "NOVEL",
+                                "polarity": "support",
+                                "excerpt": f"Unique evidence for {page['page_id']}.",
+                                "source_type": "paper",
+                            }
+                        ],
+                    }
+                    for page in supplied
+                ]
+            }
+
+        model = FakeModel({"batch_page_evidence": batch_evidence})
+        pages = [
+            FetchedPage(
+                url=f"https://source{index}.example/report",
+                normalized_url=f"https://source{index}.example/report",
+                domain=f"source{index}.example",
+                title="Source",
+                text=f"Unique evidence for P{index + 1}.",
+                content_hash=str(index),
+            )
+            for index in range(2)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig(max_pages=2)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+                evidence_batch_size=2,
+            )
+            outcomes = researcher._process_fetched_pages(
+                ResearchTask(
+                    id="T1",
+                    question="What does the evidence show?",
+                    rationale="Test batching",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                ),
+                pages,
+                threading.Event(),
+            )
+
+        self.assertEqual(["batch_page_evidence"], model.calls)
+        self.assertEqual(["source0.example", "source1.example"], [
+            item.observations[0].source_domain for item in outcomes
+        ])
+
+    def test_batched_evidence_rejects_excerpt_from_another_page(self) -> None:
+        model = FakeModel({
+            "batch_page_evidence": {
+                "pages": [
+                    {
+                        "page_id": "P1",
+                        "observations": [{
+                            "statement": "A misplaced finding.",
+                            "claim_frame_id": "NOVEL",
+                            "polarity": "support",
+                            "excerpt": "Only page two contains this sentence.",
+                            "source_type": "paper",
+                        }],
+                    },
+                    {"page_id": "P2", "observations": []},
+                ]
+            }
+        })
+        pages = [
+            FetchedPage(
+                url=f"https://source{index}.example/report",
+                normalized_url=f"https://source{index}.example/report",
+                domain=f"source{index}.example",
+                title="Source",
+                text=(
+                    "Only page one contains this sentence."
+                    if index == 1
+                    else "Only page two contains this sentence."
+                ),
+                content_hash=str(index),
+            )
+            for index in (1, 2)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig(max_pages=2)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+                evidence_batch_size=2,
+            )
+            result = researcher._extract_observations_batch(
+                ResearchTask(
+                    id="T1",
+                    question="What does the evidence show?",
+                    rationale="Test page isolation",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                ),
+                pages,
+                threading.Event(),
+            )
+
+        self.assertEqual([], result[pages[0].normalized_url])
+
+    def test_source_screening_stops_at_configured_ceiling(self) -> None:
+        results = [
+            SearchResult(f"https://source{index}.example/report", f"Source {index}")
+            for index in range(10)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = BudgetManager(BudgetConfig(max_sources=3, max_pages=2))
+            Researcher(
+                model=FakeModel({
+                    "search_queries": {
+                        "queries": [{"query_text": "focused query", "rationale": "coverage"}]
+                    },
+                    "page_evidence": {"observations": []},
+                }),
+                search=FakeSearch(results),
+                fetcher=FakeFetcher(),
+                budget=budget,
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            ).research(
+                ResearchTask(
+                    id="T1",
+                    question="What does the evidence show?",
+                    rationale="Test screening budget",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                )
+            )
+
+        self.assertEqual(3, budget.snapshot().sources)
+        self.assertEqual(2, budget.snapshot().pages)
+
     def test_claim_frame_generation_retries_duplicate_frames(self) -> None:
         calls = 0
 

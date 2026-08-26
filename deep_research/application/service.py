@@ -80,6 +80,7 @@ def run_query(
             urls=urls,
             fetch_gate=FetchGate(config.max_concurrent_fetches),
             batch_extractor=batch_extractor,
+            evidence_batch_size=4 if config.max_pages >= 100 else 1,
         ),
         critic=CriticSynthesizer(model, budget, audit),
         ledger=ledger,
