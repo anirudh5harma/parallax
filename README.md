@@ -75,7 +75,7 @@ Source IDs are deterministic. Unknown or claim-mismatched citations fail validat
 
 ## Backend layout
 
-Core rules live in `domain/`; the three roles in `agents/`; provider and extraction adapters in `infrastructure/`; run orchestration in `application/`; and HTTP/session delivery in `api/`. Thin top-level modules preserve the original public imports.
+Core rules live in `domain/`; the three roles in `agents/`; provider and extraction adapters in `infrastructure/`; run orchestration in `application/`; and HTTP/session delivery in `api/`.
 
 ## Deployment
 
