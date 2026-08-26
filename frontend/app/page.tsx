@@ -186,7 +186,12 @@ export default function Home() {
   const connect = useCallback((session: SessionSummary) => {
     streamRef.current?.close();
     const replayingTerminal = terminal.has(session.status);
-    if (replayingTerminal) void loadDetail(session.id);
+    const backgroundFailure = (cause: unknown) => {
+      if (activeIdRef.current === session.id) {
+        setError(errorNotice(cause, 'Research details could not refresh', () => connect(session)));
+      }
+    };
+    if (replayingTerminal) void loadDetail(session.id).catch(backgroundFailure);
     const stream = new EventSource(eventStreamUrl(session.id)); streamRef.current = stream;
     let closedIntentionally = false;
     stream.onopen = () => setError((value) => value?.code === 'connection_interrupted' ? null : value);
@@ -200,14 +205,14 @@ export default function Home() {
       if (data.message && activeIdRef.current === session.id) setActivity((items) => [...items, { id: `${session.id}-${event.lastEventId}`, message: data.message!, sourceDomain: data.source_domain, stage: data.stage, taskId: data.task_id, tone }]);
     };
     stream.addEventListener('session.created', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (data) push(data, event); });
-    stream.addEventListener('plan.ready', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data || session.status !== 'planning') return; push(data, event, 'done'); if (!replayingTerminal) { updateSession(session.id, { status: 'ready', plan: data.tasks ?? [] }); closedIntentionally = true; stream.close(); await loadDetail(session.id); } });
-    stream.addEventListener('plan.rejected', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; push(data, event, 'warning'); closedIntentionally = true; stream.close(); if (!replayingTerminal) { updateSession(session.id, { status: 'rejected', error: data.message ?? 'Please rewrite the question.' }); await loadDetail(session.id); } });
+    stream.addEventListener('plan.ready', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data || session.status !== 'planning') return; push(data, event, 'done'); if (!replayingTerminal) { updateSession(session.id, { status: 'ready', plan: data.tasks ?? [] }); closedIntentionally = true; stream.close(); void loadDetail(session.id).catch(backgroundFailure); } });
+    stream.addEventListener('plan.rejected', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; push(data, event, 'warning'); closedIntentionally = true; stream.close(); if (!replayingTerminal) { updateSession(session.id, { status: 'rejected', error: data.message ?? 'Please rewrite the question.' }); void loadDetail(session.id).catch(backgroundFailure); } });
     stream.addEventListener('session.started', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; if (!replayingTerminal) updateSession(session.id, { status: 'running' }); push(data, event); });
     stream.addEventListener('research.progress', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (data) push(data, event); });
     stream.addEventListener('report.started', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; if (!replayingTerminal) { updateSession(session.id, { status: 'synthesizing' }); if (activeIdRef.current === session.id) setStreamedReport(''); } push(data, event); });
     stream.addEventListener('report.chunk', (raw) => { const data = consume(raw as MessageEvent); if (!replayingTerminal && data?.text && activeIdRef.current === session.id) setStreamedReport((value) => value + data.text); });
-    stream.addEventListener('session.completed', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: data.status ?? 'completed' }); push(data, event, 'done'); closedIntentionally = true; stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
-    stream.addEventListener('session.failed', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: 'failed' }); push(data, event, 'warning'); setError(errorNotice(new ApiError({ code: data.code ?? data.error_code ?? null, message: data.message ?? 'Research could not complete.', provider: data.provider ?? null, retryable: data.retryable ?? false, status: 0 }), 'Research could not complete')); closedIntentionally = true; stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
+    stream.addEventListener('session.completed', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: data.status ?? 'completed' }); push(data, event, 'done'); closedIntentionally = true; stream.close(); void Promise.all([loadDetail(session.id), refreshSessions()]).catch(backgroundFailure); });
+    stream.addEventListener('session.failed', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: 'failed' }); push(data, event, 'warning'); setError(errorNotice(new ApiError({ code: data.code ?? data.error_code ?? null, message: data.message ?? 'Research could not complete.', provider: data.provider ?? null, retryable: data.retryable ?? false, status: 0 }), 'Research could not complete')); closedIntentionally = true; stream.close(); void Promise.all([loadDetail(session.id), refreshSessions()]).catch(backgroundFailure); });
     stream.onerror = () => { if (!replayingTerminal && !closedIntentionally && stream.readyState !== EventSource.CLOSED) setError({ title: 'Live connection interrupted', body: 'Progress updates are reconnecting automatically. Research continues in the background.', code: 'connection_interrupted', retry: () => connect(session) }); };
   }, [loadDetail, refreshSessions, updateSession]);
 
