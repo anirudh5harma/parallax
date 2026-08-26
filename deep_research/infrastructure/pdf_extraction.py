@@ -12,7 +12,6 @@ from multiprocessing.connection import Connection
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-
 MIN_PDF_TEXT_CHARACTERS = 80
 MIN_ALPHANUMERIC_RATIO = 0.25
 MAX_REPLACEMENT_CHARACTER_RATIO = 0.01

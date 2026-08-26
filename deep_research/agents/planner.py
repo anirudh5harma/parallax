@@ -4,10 +4,13 @@ from typing import Any
 
 from ..domain.budget import BudgetManager
 from ..domain.models import Priority, ResearchTask
-from ..domain.time_context import current_utc_date, has_current_anchor, requires_current_evidence
+from ..domain.time_context import (
+    current_utc_date,
+    has_current_anchor,
+    requires_current_evidence,
+)
 from ..infrastructure.audit import JsonlAuditLogger
 from ..infrastructure.providers import StructuredModel
-
 
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -143,7 +146,10 @@ class Planner:
         if total_share <= 0:
             raise ValueError("planner page shares must have positive total")
         tasks: list[ResearchTask] = []
-        for index, (item, raw_share) in enumerate(zip(raw_tasks, raw_shares), start=1):
+        for index, (item, raw_share) in enumerate(
+            zip(raw_tasks, raw_shares, strict=True),
+            start=1,
+        ):
             self.budget.reserve_primary_task()
             tasks.append(
                 ResearchTask(
@@ -169,7 +175,7 @@ class Planner:
             raise ValueError("approved plan may only contain primary tasks")
         if len({task.id for task in tasks}) != len(tasks):
             raise ValueError("approved plan task IDs must be unique")
-        for task in tasks:
+        for _task in tasks:
             self.budget.reserve_primary_task()
         self.audit.log(
             "planner.plan_created",

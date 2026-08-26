@@ -576,7 +576,8 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
 
     def test_rejects_private_and_ambiguous_dns(self) -> None:
         private = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
-        mixed = private + [
+        mixed = [
+            *private,
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))
         ]
         for addresses in (private, mixed):

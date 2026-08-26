@@ -6,7 +6,6 @@ from pathlib import Path
 
 from deep_research.application.runtime import worker_script_path
 
-
 PACKAGE_ROOT = Path(__file__).parents[1] / "deep_research"
 LAYERS = ("domain", "infrastructure", "agents", "application", "api")
 ALLOWED_DEPENDENCIES = {
@@ -16,9 +15,20 @@ ALLOWED_DEPENDENCIES = {
     "application": {"domain", "infrastructure", "agents", "application"},
     "api": {"domain", "application", "api"},
 }
+ALLOWED_ROOT_MODULES = {
+    "__init__.py",
+    "__main__.py",
+    "_worker.py",
+    "cli.py",
+    "web_cli.py",
+}
 
 
 class ArchitectureBoundaryTests(unittest.TestCase):
+    def test_package_root_contains_only_entrypoints(self) -> None:
+        root_modules = {path.name for path in PACKAGE_ROOT.glob("*.py")}
+        self.assertEqual(ALLOWED_ROOT_MODULES, root_modules)
+
     def test_worker_entrypoint_resolves_after_package_restructure(self) -> None:
         self.assertTrue(worker_script_path().is_file())
         self.assertEqual("_worker.py", worker_script_path().name)

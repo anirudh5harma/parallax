@@ -4,7 +4,6 @@ import threading
 from collections import Counter
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-
 TRACKING_PARAMETERS = {
     "fbclid",
     "gclid",

@@ -2,9 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deep_research.infrastructure.audit import JsonlAuditLogger
 from deep_research.domain.ledger import EvidenceLedger
 from deep_research.domain.models import EvidenceObservation, Polarity
+from deep_research.infrastructure.audit import JsonlAuditLogger
 
 
 def observation(

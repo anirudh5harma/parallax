@@ -5,13 +5,12 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from deep_research.api.sessions import ResearchSessionService, SessionCapacityError
 from deep_research.api.http import (
     GLOBAL_LIMITS,
     AnonymousWorkspaceQuota,
     create_app,
 )
-
+from deep_research.api.sessions import ResearchSessionService, SessionCapacityError
 
 WORKSPACE_A = "a" * 32
 WORKSPACE_B = "b" * 32

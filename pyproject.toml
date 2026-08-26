@@ -9,13 +9,13 @@ description = "Bounded three-role research with a transparent evidence ledger"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.116,<1",
-  "pypdf>=6.16,<7",
-  "uvicorn>=0.35,<1",
+  "fastapi==0.141.1",
+  "pypdf==6.16.2",
+  "uvicorn==0.52.4",
 ]
 
 [project.optional-dependencies]
-dev = ["httpx2>=2,<3"]
+dev = ["httpx2==2.12.0", "ruff==0.16.4"]
 
 [project.scripts]
 deep-research = "deep_research.cli:main"
@@ -23,3 +23,10 @@ deep-research-api = "deep_research.web_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["deep_research*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "C4", "E4", "E7", "E9", "F", "I", "RUF", "UP"]

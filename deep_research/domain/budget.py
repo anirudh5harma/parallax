@@ -4,7 +4,6 @@ import threading
 import time
 from dataclasses import dataclass
 
-
 MAX_PRIMARY_TASKS = 4
 MAX_FOLLOWUP_TASKS = 2
 MAX_RESEARCH_TASKS = 6
@@ -56,7 +55,7 @@ class BudgetConfig:
             raise ValueError("task class ceilings exceed max_research_tasks")
 
     @classmethod
-    def serious(cls) -> "BudgetConfig":
+    def serious(cls) -> BudgetConfig:
         return cls(
             max_searches=100,
             max_pages=600,

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-import threading
 
 from ..agents.critic import CriticSynthesizer
 from ..agents.planner import Planner

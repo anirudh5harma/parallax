@@ -3,7 +3,7 @@ services:
     name: parallax-research-api
     runtime: python
     plan: free
-    buildCommand: pip install -e .
+    buildCommand: pip install .
     startCommand: deep-research-api --host 0.0.0.0
     healthCheckPath: /api/health
     envVars:

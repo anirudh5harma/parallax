@@ -85,11 +85,12 @@ Core rules live in `domain/`; the three roles in `agents/`; provider and extract
 
 Production secrets stay in the hosting platforms. `NEXT_PUBLIC_RESEARCH_API_URL` points the frontend to Render; the backend uses explicit allowed origins and hosts.
 
-The current public deployment uses a free Render instance. It can cold-start after inactivity, and restarts clear in-memory sessions and process-local anonymous quotas. V1 has no authentication or persistent database.
+The current public deployment uses a free Render instance. It can cold-start after inactivity, and restarts clear in-memory sessions and process-local anonymous quotas. Per-workspace and service-wide daily ceilings bound anonymous use within one process; hosting-edge limits remain necessary for public abuse protection. V1 has no authentication or persistent database.
 
 ## Tests
 
 ```bash
+python -m ruff check deep_research
 python -m unittest discover -s tests -v
 cd frontend && npm run lint && npm run build
 ```

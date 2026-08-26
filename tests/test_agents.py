@@ -1,5 +1,5 @@
-import json
 import hashlib
+import json
 import tempfile
 import threading
 import time
@@ -8,14 +8,19 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from deep_research.infrastructure.audit import JsonlAuditLogger
-from deep_research.domain.budget import BudgetConfig, BudgetExceeded, BudgetManager
-from deep_research.domain.models import FetchedPage, Priority, ResearchTask, SearchResult, TaskStatus
 from deep_research.agents.planner import InvalidResearchQuery, Planner
-from deep_research.infrastructure.providers import ProviderError
 from deep_research.agents.researcher import FetchGate, Researcher, _Candidate, _select_candidates
-from deep_research.domain.urls import UrlRegistry
-from deep_research.domain.urls import normalize_url
+from deep_research.domain.budget import BudgetConfig, BudgetExceeded, BudgetManager
+from deep_research.domain.models import (
+    FetchedPage,
+    Priority,
+    ResearchTask,
+    SearchResult,
+    TaskStatus,
+)
+from deep_research.domain.urls import UrlRegistry, normalize_url
+from deep_research.infrastructure.audit import JsonlAuditLogger
+from deep_research.infrastructure.providers import ProviderError
 from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 
@@ -367,7 +372,7 @@ class ResearcherTests(unittest.TestCase):
         self.assertEqual([], result.errors)
         self.assertEqual(2, len(result.explorations))
 
-    def test_serious_run_batch_extracts_only_ranked_shortlist(self) -> None:
+    def test_serious_run_spends_full_task_page_share(self) -> None:
         class Extractor:
             def __init__(self) -> None:
                 self.calls: list[list[str]] = []

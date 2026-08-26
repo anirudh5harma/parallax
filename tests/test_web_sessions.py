@@ -1,9 +1,9 @@
+import json
 import tempfile
 import threading
 import unittest
-import json
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
 
 from deep_research.api.sessions import (
     DEFAULT_BEDROCK_MODEL,

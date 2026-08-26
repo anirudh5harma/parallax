@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit
 
 
-class Priority(str, Enum):
+class Priority(StrEnum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -20,20 +20,20 @@ class TaskStatus(str, Enum):
     SKIPPED = "skipped"
 
 
-class Polarity(str, Enum):
+class Polarity(StrEnum):
     SUPPORT = "support"
     CONTRADICT = "contradict"
     NEUTRAL = "neutral"
 
 
-class ConfidenceTag(str, Enum):
+class ConfidenceTag(StrEnum):
     HIGH = "High"
     MODERATE = "Moderate"
     LOW = "Low"
     INSUFFICIENT = "Insufficient"
 
 
-class FetchStatus(str, Enum):
+class FetchStatus(StrEnum):
     FETCHED = "fetched"
     FAILED = "failed"
     SKIPPED_DUPLICATE = "skipped_duplicate"
@@ -166,7 +166,7 @@ class ResearchResult:
 
 
 def to_primitive(value: Any) -> Any:
-    if isinstance(value, Enum):
+    if isinstance(value, StrEnum):
         return value.value
     if hasattr(value, "__dataclass_fields__"):
         return {key: to_primitive(item) for key, item in asdict(value).items()}

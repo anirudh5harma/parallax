@@ -5,10 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from deep_research.domain.budget import BudgetConfig
-from deep_research.cli import _worker_timeout
-from deep_research.web_cli import main
 from deep_research.api.sessions import ResearchSessionService
+from deep_research.cli import _worker_timeout
+from deep_research.domain.budget import BudgetConfig
+from deep_research.web_cli import main
 
 
 class WebCliTests(unittest.TestCase):

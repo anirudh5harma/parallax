@@ -4,8 +4,8 @@ import hashlib
 import json
 import math
 import threading
-from copy import deepcopy
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -19,11 +19,15 @@ from ..domain.models import (
     Polarity,
     ResearchResult,
     ResearchTask,
-    SearchResult,
     SearchQuery,
+    SearchResult,
     TaskStatus,
 )
-from ..domain.time_context import current_utc_date, has_current_anchor, requires_current_evidence
+from ..domain.time_context import (
+    current_utc_date,
+    has_current_anchor,
+    requires_current_evidence,
+)
 from ..domain.urls import UrlRegistry, normalize_url
 from ..infrastructure.audit import JsonlAuditLogger
 from ..infrastructure.providers import (
@@ -114,7 +118,7 @@ def _select_candidates(candidates: list[_Candidate], limit: int) -> list[_Candid
     deferred: list[_Candidate] = []
     domain_counts: dict[str, int] = {}
     while by_query and len(selected) < limit:
-        for query_index in sorted(list(by_query)):
+        for query_index in sorted(by_query):
             queue = by_query[query_index]
             chosen: _Candidate | None = None
             while queue and chosen is None:
@@ -445,7 +449,7 @@ class Researcher:
             prefetched, failed, batch_provider_error = self._batch_extract(
                 task, candidates, cancellation
             )
-            for exploration, error in failed:
+            for exploration, _error in failed:
                 explorations.append(exploration)
             if candidates and not prefetched:
                 errors.append(

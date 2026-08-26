@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import unicodedata
-from typing import Any, Iterable, Protocol
+from collections.abc import Iterable
+from typing import Any, Protocol
 
 from .models import ConfidenceTag, EvidenceClaim, EvidenceObservation, Polarity
 

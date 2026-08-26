@@ -12,7 +12,13 @@ from ..agents.planner import InvalidResearchQuery, Planner
 from ..agents.researcher import FetchGate, Researcher
 from ..domain.budget import BudgetConfig, BudgetManager
 from ..domain.ledger import EvidenceLedger
-from ..domain.models import Priority, ResearchResult, ResearchTask, TaskStatus, to_primitive
+from ..domain.models import (
+    Priority,
+    ResearchResult,
+    ResearchTask,
+    TaskStatus,
+    to_primitive,
+)
 from ..domain.urls import UrlRegistry
 from ..infrastructure.audit import JsonlAuditLogger
 from ..infrastructure.providers import (
