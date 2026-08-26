@@ -21,7 +21,7 @@ from .cli import _worker_timeout
 
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed", "rejected"}
 STREAM_END_STATUSES = TERMINAL_STATUSES | {"ready"}
-DEFAULT_OPUS_MODEL = "us.anthropic.claude-opus-4-6-v1"
+DEFAULT_BEDROCK_MODEL = "us.anthropic.claude-sonnet-4-6"
 MAX_SESSION_EVENTS = 2_000
 MAX_RETAINED_SESSIONS = 50
 MAX_ACTIVE_SESSIONS = 2
@@ -249,7 +249,7 @@ class ResearchSessionService:
         self.output_root = output_root.resolve()
         self.config = config or BudgetConfig()
         self.model_id = model_id or os.environ.get(
-            "BEDROCK_WEB_MODEL_ID", DEFAULT_OPUS_MODEL
+            "BEDROCK_WEB_MODEL_ID", DEFAULT_BEDROCK_MODEL
         )
         self.auto_start = auto_start
         self.max_active_sessions = max_active_sessions

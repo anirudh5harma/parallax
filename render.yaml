@@ -13,7 +13,7 @@ services:
       - key: AWS_REGION
         value: us-east-1
       - key: BEDROCK_WEB_MODEL_ID
-        value: us.anthropic.claude-opus-4-6-v1
+        value: us.anthropic.claude-sonnet-4-6
       - key: WEB_ALLOWED_ORIGINS
         sync: false
       - key: WEB_ALLOWED_HOSTS

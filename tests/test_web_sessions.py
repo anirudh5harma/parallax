@@ -6,6 +6,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from deep_research.web_sessions import (
+    DEFAULT_BEDROCK_MODEL,
     MAX_SESSION_EVENTS,
     ResearchSession,
     ResearchSessionService,
@@ -64,6 +65,13 @@ class EvidenceViewTests(unittest.TestCase):
 
 
 class ResearchSessionServiceTests(unittest.TestCase):
+    def test_defaults_to_supported_web_model(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            service = ResearchSessionService(auto_start=False)
+
+        self.assertEqual("us.anthropic.claude-sonnet-4-6", DEFAULT_BEDROCK_MODEL)
+        self.assertEqual(DEFAULT_BEDROCK_MODEL, service.model_id)
+
     def test_failure_exposes_safe_structured_error(self) -> None:
         service = ResearchSessionService(auto_start=False)
         session = service.create("A bounded research question")
