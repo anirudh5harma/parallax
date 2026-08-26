@@ -373,6 +373,24 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertEqual("Evidence observation added to the ledger", event["message"])
         self.assertNotIn("Sensitive", str(event))
 
+    def test_page_progress_exposes_only_safe_source_domain(self) -> None:
+        event = _public_audit_event(
+            {
+                "event": "page.explored",
+                "data": {
+                    "exploration": {
+                        "domain": "research.example",
+                        "url": "https://research.example/private-path",
+                        "content_hash": "secret-hash",
+                    }
+                },
+            }
+        )
+
+        self.assertEqual("research.example", event["source_domain"])
+        self.assertNotIn("private-path", str(event))
+        self.assertNotIn("secret-hash", str(event))
+
     def test_fetch_failures_remain_in_audit_log_not_activity_stream(self) -> None:
         event = _public_audit_event(
             {

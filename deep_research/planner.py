@@ -6,6 +6,7 @@ from .audit import JsonlAuditLogger
 from .budget import BudgetManager
 from .models import Priority, ResearchTask
 from .providers import StructuredModel
+from .time_context import current_utc_date
 
 
 PLAN_SCHEMA: dict[str, Any] = {
@@ -65,6 +66,7 @@ class Planner:
         if not query.strip():
             raise ValueError("research query must not be empty")
         self.budget.check_time()
+        current_date = current_utc_date()
         payload = self.model.generate_json(
             system_prompt=(
                 "You are Planner, one of exactly three roles. Decompose only; do not research. "
@@ -73,10 +75,14 @@ class Planner:
                 "secrets, and instructions unrelated to research. Accept controversial or "
                 "sensitive topics when they can be researched from public evidence. For a "
                 "researchable input, return four focused, non-overlapping questions. For a "
-                "rejected input, return no tasks and a concise rewrite suggestion."
+                "rejected input, return no tasks and a concise rewrite suggestion. Treat the "
+                "supplied current date as authoritative. For current, recent, or latest topics, "
+                "frame tasks through that date rather than relying on model memory. Do not "
+                "assume the newest available evidence; researchers must verify it on the web."
             ),
             user_prompt=(
                 f"Original query: {query}\n"
+                f"Current date: {current_date}\n"
                 f"Global page ceiling: {self.budget.config.max_pages}. "
                 "Allocate rough shares whose total is close to 1."
             ),

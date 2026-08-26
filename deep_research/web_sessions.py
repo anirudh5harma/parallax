@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -751,8 +752,16 @@ def _public_audit_event(record: dict[str, Any]) -> dict[str, Any] | None:
     message = messages.get(event)
     if message is None:
         return None
-    return {
+    public = {
         "stage": event,
         "message": message,
         "task_id": data.get("task_id"),
     }
+    if event == "page.explored":
+        exploration = data.get("exploration")
+        domain = exploration.get("domain") if isinstance(exploration, dict) else None
+        if isinstance(domain, str) and re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", domain
+        ):
+            public["source_domain"] = domain
+    return public

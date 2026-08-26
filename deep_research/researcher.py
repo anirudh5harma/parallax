@@ -20,6 +20,7 @@ from .models import (
     TaskStatus,
 )
 from .providers import PageFetcher, ProviderError, SearchClient, StructuredModel
+from .time_context import current_utc_date
 from .urls import UrlRegistry, normalize_url
 
 
@@ -267,15 +268,22 @@ class Researcher:
     ) -> list[SearchQuery]:
         exact = self.budget.config.max_pages >= 500
         quantity = f"exactly {target}" if exact else f"up to {target}"
+        current_date = current_utc_date()
         system_prompt = (
             f"You are Researcher, one of exactly three roles. Generate {quantity} focused, "
             "non-duplicate search queries. Use materially different angles: baseline evidence, "
             "primary studies, official data, systematic reviews, methods and limitations, "
             "recent evidence, historical evidence, geographic variation, population or industry "
             "variation, outcomes, mechanisms, implementation, alternative terminology, critical "
-            "evidence, and direct contradictions. Do not answer the question."
+            "evidence, and direct contradictions. Treat the supplied current date as "
+            "authoritative. For time-sensitive questions, include searches covering the "
+            "current year and verify freshness from web sources. Do not answer the question."
         )
-        user_prompt = f"Question: {task.question}\nRationale: {task.rationale}"
+        user_prompt = (
+            f"Question: {task.question}\n"
+            f"Rationale: {task.rationale}\n"
+            f"Current date: {current_date}"
+        )
         schema = _query_schema(target, exact=exact)
 
         def generate() -> list[SearchQuery]:

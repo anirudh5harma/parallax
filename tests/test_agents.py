@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from deep_research.audit import JsonlAuditLogger
 from deep_research.budget import BudgetConfig, BudgetManager
@@ -13,6 +14,39 @@ from tests.fakes import FakeFetcher, FakeModel, FakeSearch
 
 
 class PlannerTests(unittest.TestCase):
+    def test_planner_receives_authoritative_current_date(self) -> None:
+        prompts: list[str] = []
+        model = FakeModel(
+            {
+                "research_plan": lambda prompt: (
+                    prompts.append(prompt)
+                    or {
+                        "disposition": "researchable",
+                        "reason": "Ready for research.",
+                        "tasks": [
+                            {
+                                "question": f"Current question {index}?",
+                                "rationale": f"Current rationale {index}",
+                                "priority": "high",
+                                "page_budget_share": 0.25,
+                            }
+                            for index in range(1, 5)
+                        ],
+                    }
+                )
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "deep_research.planner.current_utc_date", return_value="2026-08-26"
+        ):
+            Planner(
+                model,
+                BudgetManager(BudgetConfig()),
+                JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+            ).plan("How are markets evolving now?")
+
+        self.assertIn("Current date: 2026-08-26", prompts[0])
+
     def test_planner_creates_exactly_four_primary_tasks(self) -> None:
         model = FakeModel(
             {
@@ -85,6 +119,44 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_search_generation_receives_authoritative_current_date(self) -> None:
+        prompts: list[str] = []
+        model = FakeModel(
+            {
+                "search_queries": lambda prompt: (
+                    prompts.append(prompt)
+                    or {
+                        "queries": [
+                            {"query_text": "current evidence", "rationale": "freshness"}
+                        ]
+                    }
+                ),
+                "page_evidence": {"observations": []},
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "deep_research.researcher.current_utc_date", return_value="2026-08-26"
+        ):
+            Researcher(
+                model=model,
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig(max_pages=1)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            ).research(
+                ResearchTask(
+                    id="T1",
+                    question="What changed recently?",
+                    rationale="Find current evidence",
+                    priority=Priority.HIGH,
+                    page_budget_share=1,
+                )
+            )
+
+        self.assertIn("Current date: 2026-08-26", prompts[0])
+
     def test_serious_run_generates_fifteen_queries_per_primary_task(self) -> None:
         model = FakeModel(
             {
