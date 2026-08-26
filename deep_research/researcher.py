@@ -40,6 +40,7 @@ class _Candidate:
     normalized_url: str
     domain: str
     discovery_order: int
+    query_index: int = 0
 
 
 def _source_quality(candidate: _Candidate) -> int:
@@ -92,22 +93,34 @@ def _source_quality(candidate: _Candidate) -> int:
 
 
 def _select_candidates(candidates: list[_Candidate], limit: int) -> list[_Candidate]:
-    """Prefer stronger results while keeping the initial read set domain-diverse."""
+    """Prefer stronger results while preserving query and domain breadth."""
     ranked = sorted(
         candidates,
         key=lambda candidate: (-_source_quality(candidate), candidate.discovery_order),
     )
+    by_query: dict[int, list[_Candidate]] = {}
+    for candidate in ranked:
+        by_query.setdefault(candidate.query_index, []).append(candidate)
     selected: list[_Candidate] = []
     deferred: list[_Candidate] = []
     domain_counts: dict[str, int] = {}
-    for candidate in ranked:
-        if domain_counts.get(candidate.domain, 0) >= 3:
-            deferred.append(candidate)
-            continue
-        selected.append(candidate)
-        domain_counts[candidate.domain] = domain_counts.get(candidate.domain, 0) + 1
-        if len(selected) == limit:
-            return selected
+    while by_query and len(selected) < limit:
+        for query_index in sorted(list(by_query)):
+            queue = by_query[query_index]
+            chosen: _Candidate | None = None
+            while queue and chosen is None:
+                candidate = queue.pop(0)
+                if domain_counts.get(candidate.domain, 0) >= 3:
+                    deferred.append(candidate)
+                else:
+                    chosen = candidate
+            if not queue:
+                by_query.pop(query_index, None)
+            if chosen is not None:
+                selected.append(chosen)
+                domain_counts[chosen.domain] = domain_counts.get(chosen.domain, 0) + 1
+                if len(selected) == limit:
+                    return selected
     selected.extend(deferred[: max(0, limit - len(selected))])
     return selected
 
@@ -167,7 +180,9 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
 
 class FetchGate:
     def __init__(self, max_concurrent_fetches: int) -> None:
-        self._semaphore = threading.BoundedSemaphore(max_concurrent_fetches)
+        self._capacity = max_concurrent_fetches
+        self._active = 0
+        self._condition = threading.Condition()
         self._lock = threading.Lock()
         self._pages: dict[str, Future] = {}
 
@@ -192,13 +207,16 @@ class FetchGate:
                 raise BudgetExceeded("wall-clock timeout exhausted") from exc
 
         try:
-            with self._semaphore:
+            self._acquire(1, budget)
+            try:
                 budget.check_time()
                 budget.reserve_page()
                 page = fetcher.fetch(
                     url,
                     timeout_seconds=budget.remaining_seconds(),
                 )
+            finally:
+                self._release(1)
             future.set_result(page)
             return page
         except Exception as exc:
@@ -206,6 +224,42 @@ class FetchGate:
             with self._lock:
                 self._pages.pop(normalized, None)
             raise
+
+    def extract(
+        self,
+        extractor: BatchPageExtractor,
+        urls: list[str],
+        *,
+        query: str,
+        budget: BudgetManager,
+    ) -> list[FetchedPage]:
+        weight = len(urls)
+        if not 1 <= weight <= self._capacity:
+            raise ValueError("batch exceeds concurrent fetch capacity")
+        self._acquire(weight, budget)
+        try:
+            budget.check_time()
+            return extractor.extract(
+                urls,
+                query=query,
+                timeout_seconds=budget.remaining_seconds(),
+            )
+        finally:
+            self._release(weight)
+
+    def _acquire(self, weight: int, budget: BudgetManager) -> None:
+        with self._condition:
+            while self._active + weight > self._capacity:
+                remaining = budget.remaining_seconds()
+                if remaining <= 0 or not self._condition.wait(timeout=remaining):
+                    raise BudgetExceeded("fetch capacity timed out")
+            budget.check_time()
+            self._active += weight
+
+    def _release(self, weight: int) -> None:
+        with self._condition:
+            self._active -= weight
+            self._condition.notify_all()
 
 
 class ResearchCancelled(RuntimeError):
@@ -246,6 +300,8 @@ class Researcher:
         if not self._model_slots.acquire(timeout=timeout):
             raise BudgetExceeded("model request capacity timed out")
         try:
+            self.budget.check_time()
+            kwargs["timeout_seconds"] = max(0.001, self.budget.remaining_seconds())
             return self.model.generate_json(**kwargs)
         finally:
             self._model_slots.release()
@@ -273,7 +329,7 @@ class Researcher:
         reused_candidates: list[_Candidate] = []
         reuse_cap = max(4, math.ceil(page_cap * 0.1))
         candidate_norms: set[str] = set()
-        for query in queries:
+        for query_index, query in enumerate(queries):
             self._raise_if_cancelled(cancellation)
             try:
                 self.budget.reserve_search()
@@ -321,6 +377,7 @@ class Researcher:
                     normalized_url=normalized,
                     domain=domain,
                     discovery_order=len(new_candidates) + len(reused_candidates),
+                    query_index=query_index,
                 )
                 if not claimed:
                     self.audit.log(
@@ -367,6 +424,8 @@ class Researcher:
                 )
 
         executor = ThreadPoolExecutor(max_workers=self.budget.config.max_concurrent_fetches)
+        processing_successes = 0
+        processing_failures = 0
         futures: list[Future[tuple[PageExploration, list[EvidenceObservation], str | None]]] = [
             executor.submit(
                 self._process_fetched_page,
@@ -392,8 +451,10 @@ class Researcher:
                 explorations.append(exploration)
                 observations.extend(page_observations)
                 if exploration.fetch_status is FetchStatus.FETCHED and error is None:
+                    processing_successes += 1
                     self.audit.log("page.explored", exploration=exploration)
                 if error:
+                    processing_failures += 1
                     self.audit.log(
                         "page.processing_failed",
                         task_id=task.id,
@@ -408,12 +469,17 @@ class Researcher:
                 future.cancel()
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+        if processing_failures:
+            errors.append(f"{processing_failures} source evidence extractions failed")
+            error_code = error_code or "bedrock_unavailable"
         if queries and search_failures and len(search_failures) == len(queries):
             failure = search_failures[-1]
             errors.append(failure.public_message)
             error_code = failure.code
-        if not cancellation.is_set():
-            task.status = TaskStatus.COMPLETED if not errors else TaskStatus.FAILED
+        if cancellation.is_set() or (errors and processing_successes == 0):
+            task.status = TaskStatus.FAILED
+        else:
+            task.status = TaskStatus.COMPLETED
         return ResearchResult(
             task_id=task.id,
             observations=observations,
@@ -532,10 +598,11 @@ class Researcher:
         pages: list[FetchedPage] = []
         failures: list[tuple[PageExploration, str]] = []
         provider_error: ProviderError | None = None
-        for offset in range(0, len(candidates), 20):
+        batch_size = min(20, self.budget.config.max_concurrent_fetches)
+        for offset in range(0, len(candidates), batch_size):
             self._raise_if_cancelled(cancellation)
             batch: list[_Candidate] = []
-            for candidate in candidates[offset : offset + 20]:
+            for candidate in candidates[offset : offset + batch_size]:
                 try:
                     self.budget.reserve_page()
                 except BudgetExceeded as exc:
@@ -546,10 +613,11 @@ class Researcher:
                 break
             requested = {candidate.normalized_url: candidate for candidate in batch}
             try:
-                extracted = self.batch_extractor.extract(
+                extracted = self.fetch_gate.extract(
+                    self.batch_extractor,
                     [candidate.result.url for candidate in batch],
                     query=task.question,
-                    timeout_seconds=self.budget.remaining_seconds(),
+                    budget=self.budget,
                 )
             except (ProviderError, ValueError, BudgetExceeded) as exc:
                 if isinstance(exc, ProviderError):

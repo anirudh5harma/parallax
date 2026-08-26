@@ -1,14 +1,18 @@
 import json
 import hashlib
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 from deep_research.audit import JsonlAuditLogger
-from deep_research.budget import BudgetConfig, BudgetManager
+from deep_research.budget import BudgetConfig, BudgetExceeded, BudgetManager
 from deep_research.models import FetchedPage, Priority, ResearchTask, SearchResult, TaskStatus
 from deep_research.planner import InvalidResearchQuery, Planner
+from deep_research.providers import ProviderError
 from deep_research.researcher import FetchGate, Researcher, _Candidate, _select_candidates
 from deep_research.urls import UrlRegistry
 from deep_research.urls import normalize_url
@@ -285,9 +289,135 @@ class ResearcherTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual([20, 10], [len(batch) for batch in extractor.calls])
+        self.assertEqual([12, 12, 6], [len(batch) for batch in extractor.calls])
         self.assertEqual(30, budget.snapshot().pages)
         self.assertEqual(0, fetcher.max_active)
+        query_angles = {
+            int(url.split("source", 1)[1].split("-", 1)[0])
+            for batch in extractor.calls
+            for url in batch
+        }
+        self.assertEqual(set(range(15)), query_angles)
+
+    def test_batch_extract_gate_enforces_weighted_global_capacity(self) -> None:
+        class SlowExtractor:
+            def __init__(self) -> None:
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def extract(
+                self,
+                urls: list[str],
+                *,
+                query: str,
+                timeout_seconds: float,
+            ) -> list[FetchedPage]:
+                del query, timeout_seconds
+                with self.lock:
+                    self.active += len(urls)
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.02)
+                    return []
+                finally:
+                    with self.lock:
+                        self.active -= len(urls)
+
+        extractor = SlowExtractor()
+        budget = BudgetManager(
+            BudgetConfig(max_pages=4, max_concurrent_fetches=2)
+        )
+        gate = FetchGate(2)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    gate.extract,
+                    extractor,
+                    [f"https://source{index}.example/a", f"https://source{index}.example/b"],
+                    query="question",
+                    budget=budget,
+                )
+                for index in range(2)
+            ]
+            for future in futures:
+                future.result()
+
+        self.assertEqual(2, extractor.max_active)
+
+    def test_model_slot_wait_rechecks_wall_clock_deadline(self) -> None:
+        class SlowModel:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def generate_json(self, **kwargs: object) -> dict[str, object]:
+                del kwargs
+                self.calls += 1
+                time.sleep(0.04)
+                return {}
+
+        model = SlowModel()
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(
+                    BudgetConfig(
+                        max_concurrent_fetches=1,
+                        wall_clock_timeout_seconds=0.02,
+                    )
+                ),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(1),
+            )
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(researcher._generate_json, timeout_seconds=1)
+                time.sleep(0.005)
+                second = executor.submit(researcher._generate_json, timeout_seconds=1)
+                first.result()
+                with self.assertRaises(BudgetExceeded):
+                    second.result()
+
+        self.assertEqual(1, model.calls)
+
+    def test_all_evidence_model_failures_fail_the_task(self) -> None:
+        def fail_evidence(_prompt: str) -> dict[str, object]:
+            raise ProviderError(
+                "model unavailable",
+                code="bedrock_unavailable",
+                public_message="Bedrock is temporarily unavailable.",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task = ResearchTask(
+                id="T1",
+                question="What does the evidence show?",
+                rationale="Validate extraction failure handling",
+                priority=Priority.HIGH,
+                page_budget_share=1,
+            )
+            result = Researcher(
+                model=FakeModel(
+                    {
+                        "search_queries": {
+                            "queries": [{"query_text": "query", "rationale": "coverage"}]
+                        },
+                        "page_evidence": fail_evidence,
+                    }
+                ),
+                search=FakeSearch([SearchResult("https://example.com/a", "A")]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig(max_pages=1)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            ).research(task)
+
+        self.assertEqual(TaskStatus.FAILED, task.status)
+        self.assertEqual("bedrock_unavailable", result.error_code)
+        self.assertEqual(["1 source evidence extractions failed"], result.errors)
 
     def test_candidate_selection_prefers_primary_and_diverse_domains(self) -> None:
         candidates = [
