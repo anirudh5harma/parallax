@@ -422,7 +422,9 @@ class CriticSynthesizer:
             "disagreement field is true must appear only in contested_findings; claims whose "
             "disagreement field is false must never appear there. Never create numeric "
             "confidence scores. Answer the original query directly. Never narrate the research "
-            "process, tasks, searches, pages, tools, models, ledger construction, or run quality."
+            "process, tasks, searches, pages, tools, models, ledger construction, or run quality. "
+            "Write the executive summary as a direct, natural answer, not a list of confidence "
+            "labels or stock phrases about sources agreeing or disagreeing."
         )
         report_input = {
             "original_query": original_query,

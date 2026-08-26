@@ -13,6 +13,7 @@ class CitationError(ValueError):
 
 
 MAX_REPORT_WORDS = 1_800
+SOURCE_TYPE_RANK = {"official": 0, "paper": 1, "news": 2, "other": 3}
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +148,16 @@ def build_synthesis_context(
             selected: list[EvidenceObservation] = []
             selected_ids: set[str] = set()
             seen_domains: set[str] = set()
-            for item in items:
+            ranked_items = sorted(
+                items,
+                key=lambda item: (
+                    SOURCE_TYPE_RANK.get(item.source_type or "other", 3),
+                    0 if item.source_domain.endswith((".gov", ".edu", ".int")) else 1,
+                    item.source_domain,
+                    item.observation_id,
+                ),
+            )
+            for item in ranked_items:
                 if item.source_domain in seen_domains:
                     continue
                 selected.append(item)
@@ -156,7 +166,7 @@ def build_synthesis_context(
                 if len(selected) >= max_sources_per_polarity:
                     break
             if len(selected) < max_sources_per_polarity:
-                for item in items:
+                for item in ranked_items:
                     if item.observation_id in selected_ids:
                         continue
                     selected.append(item)
@@ -286,7 +296,7 @@ def build_fallback_report_payload(
                 f"Available sources contradict this proposition: {statement}"
                 if contradiction_only
                 else (
-                    f"Sources disagree about this finding: {statement}"
+                    f"Evidence points in different directions on whether {statement}"
                     if claim_id in context.contested_claim_ids
                     else (
                         f"Evidence is insufficient to establish whether {statement}"

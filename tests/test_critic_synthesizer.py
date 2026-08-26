@@ -118,6 +118,48 @@ class CriticSynthesizerTests(unittest.TestCase):
             selected_urls,
         )
 
+    def test_synthesis_packet_prefers_primary_source_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            statement = "A result is supported by several source types."
+            observations = [
+                EvidenceObservation(
+                    observation_id=f"O{index}",
+                    task_id="T1",
+                    source_url=url,
+                    source_domain=domain,
+                    statement=statement,
+                    polarity=Polarity.SUPPORT,
+                    excerpt="Measured result.",
+                    source_type=source_type,
+                )
+                for index, (url, domain, source_type) in enumerate(
+                    [
+                        ("https://blog.example/a", "blog.example", "other"),
+                        ("https://news.example/a", "news.example", "news"),
+                        ("https://study.example/a", "study.example", "paper"),
+                        ("https://agency.gov/a", "agency.gov", "official"),
+                    ]
+                )
+            ]
+            ledger.add_observations(observations)
+            context = build_synthesis_context(
+                ledger.claims(), ledger.observations(), max_sources_per_polarity=3
+            )
+
+        selected_urls = [
+            context.source_urls[str(item["source_id"])]
+            for item in context.packet[0]["support"]
+        ]
+        self.assertEqual(
+            [
+                "https://agency.gov/a",
+                "https://study.example/a",
+                "https://news.example/a",
+            ],
+            selected_urls,
+        )
+
     def test_synthesis_provider_timeout_returns_cited_fallback(self) -> None:
         def timeout(_prompt: str) -> dict[str, object]:
             raise ProviderError(
