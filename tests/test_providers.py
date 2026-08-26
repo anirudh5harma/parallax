@@ -37,6 +37,15 @@ class BedrockConverseModelTests(unittest.TestCase):
         )
         self.assertEqual(("tavily", False), provider_error_context("tavily_quota_exhausted"))
         self.assertEqual(("bedrock", True), provider_error_context("bedrock_rate_limited"))
+        bedrock_bad_request = _provider_http_failure(
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/x/converse",
+            400,
+            ": invalid",
+        )
+        self.assertEqual("bedrock_request_rejected", bedrock_bad_request[0])
+        self.assertEqual(
+            ("bedrock", False), provider_error_context(bedrock_bad_request[0])
+        )
 
     @staticmethod
     def _simple_response() -> dict[str, object]:

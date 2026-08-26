@@ -43,6 +43,14 @@ class _Candidate:
     query_index: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _PageOutcome:
+    exploration: PageExploration
+    observations: list[EvidenceObservation]
+    status: str
+    error: Exception | None = None
+
+
 def _source_quality(candidate: _Candidate) -> int:
     """Small deterministic preference for primary, research, and report-like sources."""
     domain = candidate.domain.casefold()
@@ -425,8 +433,9 @@ class Researcher:
 
         executor = ThreadPoolExecutor(max_workers=self.budget.config.max_concurrent_fetches)
         processing_successes = 0
-        processing_failures = 0
-        futures: list[Future[tuple[PageExploration, list[EvidenceObservation], str | None]]] = [
+        processing_failures: list[Exception] = []
+        fetch_failures: list[Exception] = []
+        futures: list[Future[_PageOutcome]] = [
             executor.submit(
                 self._process_fetched_page,
                 task,
@@ -447,20 +456,23 @@ class Researcher:
             )
         try:
             for future in as_completed(futures, timeout=max(0.001, self.budget.remaining_seconds())):
-                exploration, page_observations, error = future.result()
+                outcome = future.result()
+                exploration = outcome.exploration
                 explorations.append(exploration)
-                observations.extend(page_observations)
-                if exploration.fetch_status is FetchStatus.FETCHED and error is None:
+                observations.extend(outcome.observations)
+                if outcome.status == "success":
                     processing_successes += 1
                     self.audit.log("page.explored", exploration=exploration)
-                if error:
-                    processing_failures += 1
+                elif outcome.status == "failed" and outcome.error is not None:
+                    processing_failures.append(outcome.error)
                     self.audit.log(
                         "page.processing_failed",
                         task_id=task.id,
                         normalized_url=exploration.normalized_url,
-                        error=error,
+                        error=str(outcome.error),
                     )
+                elif outcome.status == "fetch_failed" and outcome.error is not None:
+                    fetch_failures.append(outcome.error)
         except TimeoutError:
             cancellation.set()
             errors.append("wall-clock timeout exhausted")
@@ -470,8 +482,43 @@ class Researcher:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
         if processing_failures:
-            errors.append(f"{processing_failures} source evidence extractions failed")
-            error_code = error_code or "bedrock_unavailable"
+            provider_failure = next(
+                (
+                    failure
+                    for failure in processing_failures
+                    if isinstance(failure, ProviderError) and not failure.retryable
+                ),
+                next(
+                    (
+                        failure
+                        for failure in processing_failures
+                        if isinstance(failure, ProviderError)
+                    ),
+                    None,
+                ),
+            )
+            if provider_failure is not None:
+                error_code = error_code or provider_failure.code
+                detail = provider_failure.public_message
+            else:
+                error_code = error_code or "research_failed"
+                detail = "Evidence extraction failed validation."
+            errors.append(
+                f"{len(processing_failures)} source evidence extractions failed: {detail}"
+            )
+        if candidates and not prefetched and self.batch_extractor is None and fetch_failures:
+            fetch_failure = next(
+                (item for item in fetch_failures if isinstance(item, ProviderError)),
+                None,
+            )
+            errors.append(
+                fetch_failure.public_message
+                if fetch_failure is not None
+                else "No selected sources could be fetched."
+            )
+            error_code = error_code or (
+                fetch_failure.code if fetch_failure is not None else "provider_unavailable"
+            )
         if queries and search_failures and len(search_failures) == len(queries):
             failure = search_failures[-1]
             errors.append(failure.public_message)
@@ -670,7 +717,7 @@ class Researcher:
         task: ResearchTask,
         url: str,
         cancellation: threading.Event,
-    ) -> tuple[PageExploration, list[EvidenceObservation], str | None]:
+    ) -> _PageOutcome:
         self._raise_if_cancelled(cancellation)
         try:
             page = self.fetch_gate.fetch(
@@ -692,7 +739,7 @@ class Researcher:
                 task_id=task.id,
             )
             self.audit.log("page.fetch_failed", exploration=exploration, error=str(exc))
-            return exploration, [], str(exc)
+            return _PageOutcome(exploration, [], "fetch_failed", exc)
 
         return self._process_fetched_page(task, page, cancellation)
 
@@ -701,7 +748,7 @@ class Researcher:
         task: ResearchTask,
         page: FetchedPage,
         cancellation: threading.Event,
-    ) -> tuple[PageExploration, list[EvidenceObservation], str | None]:
+    ) -> _PageOutcome:
         self._raise_if_cancelled(cancellation)
         exploration = PageExploration(
             url=page.url,
@@ -713,13 +760,13 @@ class Researcher:
         )
         if not self.urls.claim_content(page.content_hash, scope=task.id):
             self.audit.log("page.skipped_duplicate_content", exploration=exploration)
-            return exploration, [], None
+            return _PageOutcome(exploration, [], "skipped")
         try:
             extracted = self._extract_observations(task, page, cancellation)
         except (ProviderError, ValueError, BudgetExceeded) as exc:
             self.audit.log("observation.extraction_failed", exploration=exploration, error=str(exc))
-            return exploration, [], str(exc)
-        return exploration, extracted, None
+            return _PageOutcome(exploration, [], "failed", exc)
+        return _PageOutcome(exploration, extracted, "success")
 
     def _extract_observations(
         self,

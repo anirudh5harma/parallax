@@ -417,7 +417,123 @@ class ResearcherTests(unittest.TestCase):
 
         self.assertEqual(TaskStatus.FAILED, task.status)
         self.assertEqual("bedrock_unavailable", result.error_code)
-        self.assertEqual(["1 source evidence extractions failed"], result.errors)
+        self.assertEqual(
+            [
+                "1 source evidence extractions failed: "
+                "Bedrock is temporarily unavailable."
+            ],
+            result.errors,
+        )
+
+    def test_duplicate_skip_does_not_hide_all_model_failures(self) -> None:
+        class DuplicateExtractor:
+            def extract(
+                self,
+                urls: list[str],
+                *,
+                query: str,
+                timeout_seconds: float,
+            ) -> list[FetchedPage]:
+                del query, timeout_seconds
+                return [
+                    FetchedPage(
+                        url=url,
+                        normalized_url=normalize_url(url),
+                        domain=normalize_url(url).split("/")[2],
+                        title="Duplicate",
+                        text="Identical evidence text.",
+                        content_hash="same-content",
+                    )
+                    for url in urls
+                ]
+
+        def deny(_prompt: str) -> dict[str, object]:
+            raise ProviderError(
+                "denied",
+                retryable=False,
+                code="bedrock_access_denied",
+                public_message="Model access is unavailable.",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task = ResearchTask(
+                id="T1",
+                question="What does duplicated evidence show?",
+                rationale="Test duplicate failure accounting",
+                priority=Priority.HIGH,
+                page_budget_share=1,
+            )
+            result = Researcher(
+                model=FakeModel(
+                    {
+                        "search_queries": {
+                            "queries": [{"query_text": "query", "rationale": "coverage"}]
+                        },
+                        "page_evidence": deny,
+                    }
+                ),
+                search=FakeSearch(
+                    [
+                        SearchResult("https://one.example/a", "One"),
+                        SearchResult("https://two.example/a", "Two"),
+                    ]
+                ),
+                fetcher=FakeFetcher(),
+                batch_extractor=DuplicateExtractor(),
+                budget=BudgetManager(BudgetConfig(max_pages=2, max_concurrent_fetches=2)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            ).research(task)
+
+        self.assertEqual(TaskStatus.FAILED, task.status)
+        self.assertEqual("bedrock_access_denied", result.error_code)
+        self.assertIn("Model access is unavailable.", result.errors[0])
+
+    def test_partial_model_access_failure_is_reported_without_failing_task(self) -> None:
+        def evidence(prompt: str) -> dict[str, object]:
+            if "bad.example" in prompt:
+                raise ProviderError(
+                    "denied",
+                    retryable=False,
+                    code="bedrock_access_denied",
+                    public_message="Model access is unavailable.",
+                )
+            return {"observations": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task = ResearchTask(
+                id="T1",
+                question="What does mixed evidence show?",
+                rationale="Test partial failure accounting",
+                priority=Priority.HIGH,
+                page_budget_share=1,
+            )
+            result = Researcher(
+                model=FakeModel(
+                    {
+                        "search_queries": {
+                            "queries": [{"query_text": "query", "rationale": "coverage"}]
+                        },
+                        "page_evidence": evidence,
+                    }
+                ),
+                search=FakeSearch(
+                    [
+                        SearchResult("https://good.example/a", "Good"),
+                        SearchResult("https://bad.example/a", "Bad"),
+                    ]
+                ),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig(max_pages=2)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            ).research(task)
+
+        self.assertEqual(TaskStatus.COMPLETED, task.status)
+        self.assertEqual("bedrock_access_denied", result.error_code)
+        self.assertEqual(1, len(result.errors))
 
     def test_candidate_selection_prefers_primary_and_diverse_domains(self) -> None:
         candidates = [
