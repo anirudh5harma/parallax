@@ -158,11 +158,17 @@ class BudgetManager:
     def reserve_search(self) -> None:
         self._reserve("_searches", self.config.max_searches, "search")
 
-    def reserve_source(self) -> None:
-        self._reserve("_sources", self.config.max_sources, "source screening")
+    def reserve_source(self, *, primary: bool = False) -> None:
+        ceiling = self.config.max_sources
+        if primary:
+            ceiling -= self.config.followup_source_reserve
+        self._reserve("_sources", ceiling, "source screening")
 
-    def reserve_page(self) -> None:
-        self._reserve("_pages", self.config.max_pages, "page")
+    def reserve_page(self, *, primary: bool = False) -> None:
+        ceiling = self.config.max_pages
+        if primary:
+            ceiling -= self.config.followup_page_reserve
+        self._reserve("_pages", ceiling, "page")
 
     def _reserve(self, attribute: str, ceiling: int, label: str) -> None:
         with self._lock:

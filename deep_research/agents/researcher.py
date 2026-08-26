@@ -276,6 +276,7 @@ class FetchGate:
         url: str,
         *,
         budget: BudgetManager,
+        primary: bool = False,
     ):
         normalized = normalize_url(url)
         with self._lock:
@@ -294,7 +295,7 @@ class FetchGate:
             self._acquire(1, budget)
             try:
                 budget.check_time()
-                budget.reserve_page()
+                budget.reserve_page(primary=primary)
                 page = fetcher.fetch(
                     url,
                     timeout_seconds=budget.remaining_seconds(),
@@ -524,7 +525,7 @@ class Researcher:
                         reused_candidates.append(candidate)
                     continue
                 try:
-                    self.budget.reserve_source()
+                    self.budget.reserve_source(primary=task.depth == 0)
                 except BudgetExceeded:
                     screening_full = True
                     self.audit.log(
@@ -832,7 +833,7 @@ class Researcher:
             batch: list[_Candidate] = []
             for candidate in candidates[offset : offset + batch_size]:
                 try:
-                    self.budget.reserve_page()
+                    self.budget.reserve_page(primary=task.depth == 0)
                 except BudgetExceeded as exc:
                     failures.append((self._failed_exploration(task, candidate), str(exc)))
                     return pages, failures, provider_error
@@ -905,6 +906,7 @@ class Researcher:
                 self.fetcher,
                 url,
                 budget=self.budget,
+                primary=task.depth == 0,
             )
         except (BudgetExceeded, ProviderError, ValueError) as exc:
             normalized = url

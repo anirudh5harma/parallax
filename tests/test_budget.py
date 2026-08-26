@@ -6,6 +6,30 @@ from deep_research.domain.budget import BudgetConfig, BudgetExceeded, BudgetMana
 
 
 class BudgetManagerTests(unittest.TestCase):
+    def test_primary_work_cannot_consume_followup_reserves(self) -> None:
+        config = BudgetConfig.fast()
+        budget = BudgetManager(config)
+        for _ in range(config.max_pages - config.followup_page_reserve):
+            budget.reserve_page(primary=True)
+        for _ in range(config.max_sources - config.followup_source_reserve):
+            budget.reserve_source(primary=True)
+
+        with self.assertRaises(BudgetExceeded):
+            budget.reserve_page(primary=True)
+        with self.assertRaises(BudgetExceeded):
+            budget.reserve_source(primary=True)
+
+        budget.reserve_page()
+        budget.reserve_source()
+        self.assertEqual(
+            config.max_pages - config.followup_page_reserve + 1,
+            budget.snapshot().pages,
+        )
+        self.assertEqual(
+            config.max_sources - config.followup_source_reserve + 1,
+            budget.snapshot().sources,
+        )
+
     def test_interactive_profiles_preserve_breadth_with_distinct_read_budgets(self) -> None:
         fast = BudgetConfig.fast()
         deep = BudgetConfig.deep()
