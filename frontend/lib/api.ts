@@ -158,7 +158,7 @@ export class ResearchEventStream {
   private lastEventId = '';
   private stopped = false;
   onopen: (() => void) | null = null;
-  onerror: (() => void) | null = null;
+  onerror: ((cause: ApiError | null) => void) | null = null;
 
   constructor(private readonly sessionId: string) {
     void this.connect();
@@ -228,7 +228,12 @@ export class ResearchEventStream {
         }
       } catch (cause) {
         if (this.stopped || (cause instanceof DOMException && cause.name === 'AbortError')) return;
-        this.onerror?.();
+        const apiError = cause instanceof ApiError ? cause : null;
+        this.onerror?.(apiError);
+        if (apiError && !apiError.retryable) {
+          this.close();
+          return;
+        }
       }
       if (!this.stopped) await new Promise((resolve) => window.setTimeout(resolve, 1_200));
     }

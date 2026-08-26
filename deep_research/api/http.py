@@ -27,6 +27,7 @@ DEFAULT_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000"}
 DEFAULT_HOSTS = {"localhost", "127.0.0.1", "testserver"}
 MAX_REQUEST_BYTES = 16_384
 WORKSPACE_LIMITS = {"plan": 10, "run": 5, "branch": 5}
+CLIENT_LIMITS = {"plan": 10, "run": 5, "branch": 5}
 GLOBAL_LIMITS = {"plan": 50, "run": 20, "branch": 20}
 
 
@@ -36,9 +37,16 @@ class AnonymousWorkspaceQuota:
         self._day: str | None = None
         self._lock = threading.Lock()
 
-    def reserve(self, workspace_id: str, action: str) -> None:
+    def reserve(
+        self,
+        workspace_id: str,
+        action: str,
+        *,
+        client_id: str | None = None,
+    ) -> None:
         day = datetime.now(UTC).date().isoformat()
         key = (day, workspace_id, action)
+        client_key = (day, f"client:{client_id or workspace_id}", action)
         global_key = (day, "__global__", action)
         with self._lock:
             if self._day != day:
@@ -48,20 +56,33 @@ class AnonymousWorkspaceQuota:
                 raise SessionCapacityError(
                     f"daily anonymous {action} quota reached for this workspace"
                 )
+            if self._counts[client_key] >= CLIENT_LIMITS[action]:
+                raise SessionCapacityError(
+                    f"daily anonymous {action} quota reached for this client"
+                )
             if self._counts[global_key] >= GLOBAL_LIMITS[action]:
                 raise SessionCapacityError(
                     f"daily anonymous {action} capacity reached for this service"
                 )
             self._counts[key] += 1
+            self._counts[client_key] += 1
             self._counts[global_key] += 1
 
-    def refund(self, workspace_id: str, action: str) -> None:
+    def refund(
+        self,
+        workspace_id: str,
+        action: str,
+        *,
+        client_id: str | None = None,
+    ) -> None:
         day = datetime.now(UTC).date().isoformat()
         key = (day, workspace_id, action)
+        client_key = (day, f"client:{client_id or workspace_id}", action)
         global_key = (day, "__global__", action)
         with self._lock:
             if self._counts[key] > 0:
                 self._counts[key] -= 1
+                self._counts[client_key] = max(0, self._counts[client_key] - 1)
                 self._counts[global_key] = max(0, self._counts[global_key] - 1)
 
 
@@ -72,6 +93,10 @@ def _workspace_id(value: str) -> str:
     ):
         raise HTTPException(status_code=422, detail="invalid anonymous workspace key")
     return normalized
+
+
+def _client_id(request: Request) -> str:
+    return request.client.host if request.client is not None else "unknown"
 
 
 def _environment_set(name: str, defaults: set[str]) -> set[str]:
@@ -167,6 +192,7 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     @app.post("/api/sessions", status_code=status.HTTP_202_ACCEPTED)
     def create_session(
         request: ResearchRequest,
+        http_request: Request,
         x_workspace_key: str = Header(alias="X-Workspace-Key"),
     ) -> dict[str, object]:
         if not sessions.configured():
@@ -176,11 +202,12 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
             )
         try:
             workspace_id = _workspace_id(x_workspace_key)
-            quota.reserve(workspace_id, "plan")
+            client_id = _client_id(http_request)
+            quota.reserve(workspace_id, "plan", client_id=client_id)
             try:
                 session = sessions.create(request.query, workspace_id=workspace_id)
             except Exception:
-                quota.refund(workspace_id, "plan")
+                quota.refund(workspace_id, "plan", client_id=client_id)
                 raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -196,15 +223,17 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     )
     def start_session(
         session_id: str,
+        request: Request,
         x_workspace_key: str = Header(alias="X-Workspace-Key"),
     ) -> dict[str, object]:
         try:
             workspace_id = _workspace_id(x_workspace_key)
-            quota.reserve(workspace_id, "run")
+            client_id = _client_id(request)
+            quota.reserve(workspace_id, "run", client_id=client_id)
             try:
                 return sessions.start(session_id, workspace_id=workspace_id).summary()
             except Exception:
-                quota.refund(workspace_id, "run")
+                quota.refund(workspace_id, "run", client_id=client_id)
                 raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -235,11 +264,13 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     def branch_session(
         session_id: str,
         request: BranchRequest,
+        http_request: Request,
         x_workspace_key: str = Header(alias="X-Workspace-Key"),
     ) -> dict[str, object]:
         try:
             workspace_id = _workspace_id(x_workspace_key)
-            quota.reserve(workspace_id, "branch")
+            client_id = _client_id(http_request)
+            quota.reserve(workspace_id, "branch", client_id=client_id)
             try:
                 session = sessions.create_branch(
                     session_id,
@@ -247,7 +278,7 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
                     workspace_id=workspace_id,
                 )
             except Exception:
-                quota.refund(workspace_id, "branch")
+                quota.refund(workspace_id, "branch", client_id=client_id)
                 raise
         except SessionCapacityError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -262,6 +293,7 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
     @app.get("/api/sessions/{session_id}/events")
     async def stream_events(
         session_id: str,
+        request: Request,
         last_event_id: str | None = Header(default=None),
         x_workspace_key: str = Header(alias="X-Workspace-Key"),
     ) -> StreamingResponse:
@@ -276,7 +308,8 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
             cursor = int(last_event_id) + 1 if last_event_id is not None else 0
         except ValueError:
             cursor = 0
-        if not sessions.acquire_sse():
+        client_id = _client_id(request)
+        if not sessions.acquire_sse(client_id):
             raise HTTPException(status_code=429, detail="event stream capacity reached")
 
         async def events():
@@ -297,7 +330,7 @@ def create_app(service: ResearchSessionService | None = None) -> FastAPI:
                     yield ": keepalive\n\n"
                     await asyncio.sleep(0.35)
             finally:
-                sessions.release_sse()
+                sessions.release_sse(client_id)
 
         return StreamingResponse(
             events(),

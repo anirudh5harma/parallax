@@ -115,8 +115,15 @@ export default function Home() {
     stream.addEventListener('report.chunk', (raw) => { const data = consume(raw as MessageEvent); if (!replayingTerminal && data?.text && activeIdRef.current === session.id) setStreamedReport((value) => value + data.text); });
     stream.addEventListener('session.completed', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: data.status ?? 'completed' }); push(data, event, 'done'); closedIntentionally = true; stream.close(); void Promise.all([loadDetail(session.id), refreshSessions()]).catch(backgroundFailure); });
     stream.addEventListener('session.failed', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: 'failed' }); push(data, event, 'warning'); setError(errorNotice(new ApiError({ code: data.code ?? data.error_code ?? null, message: data.message ?? 'Research could not complete.', provider: data.provider ?? null, retryable: data.retryable ?? false, status: 0 }), 'Research could not complete')); closedIntentionally = true; stream.close(); void Promise.all([loadDetail(session.id), refreshSessions()]).catch(backgroundFailure); });
-    stream.onerror = () => {
+    stream.onerror = (cause) => {
       if (replayingTerminal || closedIntentionally || stream.isClosed || polling) return;
+      if (cause && !cause.retryable) {
+        closedIntentionally = true;
+        stream.close();
+        void refreshSessions().catch(() => undefined);
+        setError(errorNotice(cause, 'Research session unavailable', () => router.push('/?new=1')));
+        return;
+      }
       polling = true;
       window.setTimeout(() => {
         void loadDetail(session.id).then((value) => {
@@ -129,7 +136,7 @@ export default function Home() {
         }).catch(() => undefined).finally(() => { polling = false; });
       }, 2_500);
     };
-  }, [loadDetail, refreshSessions, updateSession]);
+  }, [loadDetail, refreshSessions, router, updateSession]);
 
   useEffect(() => {
     Promise.all([api.health(), api.sessions()]).then(([health, items]) => { setConfigured(health.configured); setSessions(items); const wantsComposer = new URLSearchParams(window.location.search).has('new'); setComposing(wantsComposer); if (items[0] && !wantsComposer) { activeIdRef.current = items[0].id; setActiveId(items[0].id); connect(items[0]); } }).catch((cause: unknown) => setError(errorNotice(cause, 'Research service unavailable', () => window.location.reload())));
@@ -237,5 +244,5 @@ function ResearchingState({ activity, plan }: { activity: Activity[]; plan: Sess
 }
 
 function Report({ report, evidence, openCitation, streaming }: { report: string; evidence: EvidenceClaim[]; openCitation: (claimId: string, sourceId: string) => void; streaming: boolean }) {
-  return <div className="assistant-message report-message"><span className="assistant-mark">P</span><article className="report"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: () => null, a: ({ href, children }) => { if (href?.startsWith('#evidence-')) { const match = href.match(/^#evidence-(.+)-(S\d+)$/); const claimId = match?.[1] ?? ''; const sourceId = match?.[2] ?? ''; const exists = evidence.some((claim) => claim.claim_id === claimId && claim.observations.some((item) => item.source_id === sourceId)); return exists ? <button className="citation" onClick={() => openCitation(claimId, sourceId)} onFocus={() => openCitation(claimId, sourceId)} onMouseEnter={() => openCitation(claimId, sourceId)} type="button">{children}</button> : <span>{children}</span>; } return <span>{children}</span>; } }}>{report}</ReactMarkdown>{streaming && <span className="stream-caret" aria-label="Answer is streaming" />}</article></div>;
+  return <div className="assistant-message report-message"><span className="assistant-mark">P</span><article className="report"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ img: () => null, a: ({ href, children }) => { if (href?.startsWith('#evidence-')) { const match = href.match(/^#evidence-(.+)-(S\d+)$/); const claimId = match?.[1] ?? ''; const sourceId = match?.[2] ?? ''; const exists = evidence.some((claim) => claim.claim_id === claimId && claim.observations.some((item) => item.source_id === sourceId)); return exists ? <button className="citation" onClick={() => openCitation(claimId, sourceId)} onMouseEnter={(event) => { const target = event.currentTarget; window.setTimeout(() => { if (target.matches(':hover')) openCitation(claimId, sourceId); }, 250); }} type="button">{children}</button> : <span>{children}</span>; } return <span>{children}</span>; } }}>{report}</ReactMarkdown>{streaming && <span className="stream-caret" aria-label="Answer is streaming" />}</article></div>;
 }

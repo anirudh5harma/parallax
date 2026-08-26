@@ -435,7 +435,7 @@ def render_report(
                     f"- Contradiction: {claim.contradicting_domain_count} distinct domains",
                     f"- Sources: {', '.join(_claim_source_ids(item))}",
                     "",
-                    str(item.get("synthesis", "Evidence remains insufficient.")),
+                    _polarity_safe_synthesis(item, claim, context),
                     "",
                 ]
             )
@@ -536,7 +536,7 @@ def _render_claim_findings(
                 f"- Contradiction: {claim.contradicting_domain_count} distinct domains",
                 f"- Sources: {', '.join(_claim_source_ids(item))}",
                 "",
-                str(item["synthesis"]),
+                _polarity_safe_synthesis(item, claim, context),
                 "",
             ]
         )
@@ -605,7 +605,12 @@ def _bound_executive_summary(
     summaries: list[str] = []
     for section, item in selected:
         _validated_claim_item(item, context, set(), section=section)
-        synthesis = re.sub(r"\[\s*S\d+\s*\]", "", str(item.get("synthesis", "")))
+        claim = context.claims_by_id[str(item["claim_id"])]
+        synthesis = re.sub(
+            r"\[\s*S\d+\s*\]",
+            "",
+            _polarity_safe_synthesis(item, claim, context),
+        )
         cleaned = " ".join(synthesis.split())
         if cleaned:
             if section == "weak_evidence":
@@ -615,6 +620,22 @@ def _bound_executive_summary(
         " ".join(summaries),
         200,
     ) or "Available evidence is insufficient to support a reliable answer."
+
+
+def _polarity_safe_synthesis(
+    item: dict[str, object],
+    claim: EvidenceClaim,
+    context: SynthesisContext,
+) -> str:
+    claim_id = claim.claim_id
+    has_support = bool(context.supporting_sources_by_claim[claim_id])
+    has_contradiction = bool(context.contradicting_sources_by_claim[claim_id])
+    statement = _display_claim_text(claim.text)
+    if not has_support and has_contradiction:
+        return f"Available sources contradict this proposition: {statement}"
+    if not has_support:
+        return f"Evidence is insufficient to establish whether {statement}"
+    return str(item.get("synthesis", "Evidence remains insufficient."))
 
 
 def _claim_source_ids(item: dict[str, object]) -> list[str]:

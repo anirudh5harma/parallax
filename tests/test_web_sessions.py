@@ -288,6 +288,16 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertIs(run_process, service._processes["session"])
         service._processes.clear()
 
+    def test_parent_pin_counts_preserve_overlapping_branches(self) -> None:
+        service = ResearchSessionService(auto_start=False)
+        service._session_pin_counts["parent"] = 2
+
+        service._release_session_pin("parent")
+
+        self.assertEqual(1, service._session_pin_counts["parent"])
+        service._release_session_pin("parent")
+        self.assertNotIn("parent", service._session_pin_counts)
+
     def test_event_retention_is_bounded_with_monotonic_ids(self) -> None:
         session = ResearchSession(
             id="session", query="query", title="title", created_at="now"
@@ -396,6 +406,16 @@ class ResearchSessionServiceTests(unittest.TestCase):
         self.assertFalse(service.acquire_sse())
         service.release_sse()
         self.assertTrue(service.acquire_sse())
+
+    def test_sse_capacity_is_bounded_per_client(self) -> None:
+        service = ResearchSessionService(auto_start=False, max_sse_connections=8)
+
+        self.assertTrue(service.acquire_sse("client-a"))
+        self.assertTrue(service.acquire_sse("client-a"))
+        self.assertFalse(service.acquire_sse("client-a"))
+        self.assertTrue(service.acquire_sse("client-b"))
+        service.release_sse("client-a")
+        self.assertTrue(service.acquire_sse("client-a"))
 
     def test_worker_start_failure_becomes_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

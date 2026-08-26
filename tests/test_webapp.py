@@ -151,10 +151,22 @@ class LocalApiBoundaryTests(unittest.TestCase):
     def test_global_anonymous_quota_cannot_be_bypassed_with_new_workspace_keys(self) -> None:
         quota = AnonymousWorkspaceQuota()
         for index in range(GLOBAL_LIMITS["plan"]):
-            quota.reserve(f"{index:032x}", "plan")
+            quota.reserve(
+                f"{index:032x}",
+                "plan",
+                client_id=f"client-{index}",
+            )
 
         with self.assertRaisesRegex(SessionCapacityError, "service"):
-            quota.reserve("f" * 32, "plan")
+            quota.reserve("f" * 32, "plan", client_id="another-client")
+
+    def test_client_quota_cannot_be_bypassed_by_rotating_workspace_keys(self) -> None:
+        quota = AnonymousWorkspaceQuota()
+        for index in range(10):
+            quota.reserve(f"{index:032x}", "plan", client_id="same-client")
+
+        with self.assertRaisesRegex(SessionCapacityError, "this client"):
+            quota.reserve("f" * 32, "plan", client_id="same-client")
 
     def test_oversized_request_is_rejected_before_parsing(self) -> None:
         client = TestClient(create_app(ResearchSessionService(auto_start=False)))

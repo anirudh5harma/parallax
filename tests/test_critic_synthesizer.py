@@ -537,6 +537,21 @@ class CriticSynthesizerTests(unittest.TestCase):
             )
             fallback = build_fallback_report_payload(context, [])
             report = render_report(fallback, context)
+            source_id = next(iter(context.contradicting_sources_by_claim[claim.claim_id]))
+            model_report = render_report(
+                {
+                    "executive_summary": "Ignored.",
+                    "main_findings": [],
+                    "contested_findings": [{
+                        "claim_id": claim.claim_id,
+                        "synthesis": "Sources disagree and X improves Y.",
+                        "source_ids": [source_id],
+                    }],
+                    "weak_evidence": [],
+                    "remaining_gaps": [],
+                },
+                context,
+            )
 
         self.assertEqual(frozenset({claim.claim_id}), context.contested_claim_ids)
         self.assertFalse(claim.disagreement_flag)
@@ -546,6 +561,8 @@ class CriticSynthesizerTests(unittest.TestCase):
         self.assertIn("Available sources contradict this proposition", report)
         self.assertNotIn("Sources disagree about this finding", report)
         self.assertIn("## Contested Findings", report)
+        self.assertIn("Available sources contradict this proposition", model_report)
+        self.assertNotIn("Sources disagree and X improves Y", model_report)
 
     def test_critic_cannot_mark_support_only_claim_as_contested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

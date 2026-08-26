@@ -27,6 +27,7 @@ MAX_SESSION_EVENTS = 2_000
 MAX_RETAINED_SESSIONS = 50
 MAX_ACTIVE_SESSIONS = 2
 MAX_SSE_CONNECTIONS = 8
+MAX_SSE_CONNECTIONS_PER_CLIENT = 2
 SESSION_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 
 
@@ -259,8 +260,9 @@ class ResearchSessionService:
         self.max_sse_connections = max_sse_connections
         self._sessions: dict[str, ResearchSession] = {}
         self._processes: dict[str, subprocess.Popen] = {}
-        self._pinned_session_ids: set[str] = set()
+        self._session_pin_counts: dict[str, int] = {}
         self._sse_connections = 0
+        self._sse_connections_by_client: dict[str, int] = {}
         self._lock = threading.Lock()
         self.output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._prune_artifacts()
@@ -345,7 +347,7 @@ class ResearchSessionService:
                         item
                         for item in self._sessions.values()
                         if item.status in EVICTABLE_STATUSES
-                        and item.id not in self._pinned_session_ids
+                        and self._session_pin_counts.get(item.id, 0) == 0
                     ),
                     key=lambda item: item.created_at,
                 )
@@ -417,16 +419,26 @@ class ResearchSessionService:
             raise SessionLaunchError("research worker could not start") from exc
         return session
 
-    def acquire_sse(self) -> bool:
+    def acquire_sse(self, client_id: str = "local") -> bool:
         with self._lock:
-            if self._sse_connections >= self.max_sse_connections:
+            client_connections = self._sse_connections_by_client.get(client_id, 0)
+            if (
+                self._sse_connections >= self.max_sse_connections
+                or client_connections >= MAX_SSE_CONNECTIONS_PER_CLIENT
+            ):
                 return False
             self._sse_connections += 1
+            self._sse_connections_by_client[client_id] = client_connections + 1
             return True
 
-    def release_sse(self) -> None:
+    def release_sse(self, client_id: str = "local") -> None:
         with self._lock:
             self._sse_connections = max(0, self._sse_connections - 1)
+            remaining = self._sse_connections_by_client.get(client_id, 0) - 1
+            if remaining > 0:
+                self._sse_connections_by_client[client_id] = remaining
+            else:
+                self._sse_connections_by_client.pop(client_id, None)
 
     def create_branch(
         self,
@@ -441,7 +453,9 @@ class ResearchSessionService:
                 workspace_id is not None and parent.workspace_id != workspace_id
             ):
                 raise KeyError(parent_id)
-            self._pinned_session_ids.add(parent_id)
+            self._session_pin_counts[parent_id] = (
+                self._session_pin_counts.get(parent_id, 0) + 1
+            )
         try:
             with parent.lock:
                 if parent.status not in {"completed", "completed_with_errors"}:
@@ -488,8 +502,15 @@ class ResearchSessionService:
                 branch=branch,
             )
         finally:
-            with self._lock:
-                self._pinned_session_ids.discard(parent_id)
+            self._release_session_pin(parent_id)
+
+    def _release_session_pin(self, session_id: str) -> None:
+        with self._lock:
+            remaining = self._session_pin_counts.get(session_id, 0) - 1
+            if remaining > 0:
+                self._session_pin_counts[session_id] = remaining
+            else:
+                self._session_pin_counts.pop(session_id, None)
 
     def _plan(self, session: ResearchSession) -> None:
         if not self.configured():
