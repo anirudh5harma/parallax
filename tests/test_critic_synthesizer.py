@@ -379,7 +379,7 @@ class CriticSynthesizerTests(unittest.TestCase):
                 remaining_gaps=[],
             )
 
-        self.assertEqual(1, calls)
+        self.assertEqual(2, calls)
         self.assertIn("- Sources: S1", report)
 
     def test_synthesis_repair_is_bounded_to_one_retry(self) -> None:
@@ -422,7 +422,7 @@ class CriticSynthesizerTests(unittest.TestCase):
             1, sum(event["event"] == "synthesis.validation_retry" for event in events)
         )
 
-    def test_synthesis_repairs_uncited_claim_finding_from_ledger(self) -> None:
+    def test_synthesis_rejects_uncited_claim_finding(self) -> None:
         model = FakeModel({})
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / "events.jsonl"
@@ -456,22 +456,21 @@ class CriticSynthesizerTests(unittest.TestCase):
                 "remaining_gaps": [],
             }
             critic = CriticSynthesizer(model, BudgetManager(BudgetConfig()), audit)
-            report = critic.synthesize(
-                original_query="Query",
-                tasks=[task()],
-                claims=ledger.claims(),
-                observations=ledger.observations(),
-                remaining_gaps=[],
-            )
+            with self.assertRaises(CitationError):
+                critic.synthesize(
+                    original_query="Query",
+                    tasks=[task()],
+                    claims=ledger.claims(),
+                    observations=ledger.observations(),
+                    remaining_gaps=[],
+                )
             events = [json.loads(line) for line in event_path.read_text().splitlines()]
 
-        self.assertIn("- Sources: S1", report)
         self.assertEqual(
-            1,
-            sum(event["event"] == "synthesis.citations_repaired" for event in events),
+            1, sum(event["event"] == "synthesis.validation_retry" for event in events),
         )
 
-    def test_synthesis_replaces_source_bound_to_another_claim(self) -> None:
+    def test_synthesis_rejects_source_bound_to_another_claim(self) -> None:
         model = FakeModel({})
         with tempfile.TemporaryDirectory() as tmp:
             audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
@@ -508,15 +507,15 @@ class CriticSynthesizerTests(unittest.TestCase):
                 "remaining_gaps": [],
             }
 
-            report = CriticSynthesizer(
-                model, BudgetManager(BudgetConfig()), audit
-            ).synthesize(
-                original_query="Query", tasks=[task()], claims=claims,
-                observations=ledger.observations(), remaining_gaps=[],
-            )
+            with self.assertRaises(CitationError):
+                CriticSynthesizer(
+                    model, BudgetManager(BudgetConfig()), audit
+                ).synthesize(
+                    original_query="Query", tasks=[task()], claims=claims,
+                    observations=ledger.observations(), remaining_gaps=[],
+                )
 
-        self.assertIn("- Sources: S1", report)
-        self.assertNotIn("S2", report)
+        self.assertEqual(2, model.calls.count("final_report"))
 
     def test_synthesis_rejects_unbound_summary_citation(self) -> None:
         model = FakeModel({})

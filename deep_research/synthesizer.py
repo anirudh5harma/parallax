@@ -136,22 +136,15 @@ def repair_report_citations(
             synthesis = re.sub(r"\[?\bS\d+\b\]?", replace_citation, synthesis)
             synthesis = re.sub(r"\(\s*\)|\[\s*\]", "", synthesis)
             item["synthesis"] = " ".join(synthesis.split())
-            fallback_added = False
-            if not valid_source_ids and allowed:
-                valid_source_ids.add(
-                    min(allowed, key=lambda source_id: int(source_id[1:]))
-                )
-                fallback_added = True
             item["source_ids"] = sorted(
                 valid_source_ids,
                 key=lambda source_id: int(source_id[1:]),
             )
-            if removed or fallback_added:
+            if removed:
                 repairs.append(
                     {
                         "claim_id": claim_id,
                         "removed_source_count": len(removed),
-                        "fallback_added": fallback_added,
                     }
                 )
     return repaired, repairs

@@ -158,6 +158,42 @@ class ResearcherTests(unittest.TestCase):
         self.assertEqual([], result.errors)
         self.assertEqual(1, researcher.budget.snapshot().searches)
 
+    def test_serious_run_rejects_fewer_than_fifteen_distinct_queries(self) -> None:
+        duplicate_queries = [
+            {"query_text": f"distinct query {index}", "rationale": "one angle"}
+            for index in range(14)
+        ]
+        duplicate_queries.append(
+            {"query_text": " DISTINCT   QUERY 0 ", "rationale": "duplicate angle"}
+        )
+        model = FakeModel(
+            {
+                "search_queries": {"queries": duplicate_queries},
+                "page_evidence": {"observations": []},
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            researcher = Researcher(
+                model=model,
+                search=FakeSearch([]),
+                fetcher=FakeFetcher(),
+                budget=BudgetManager(BudgetConfig.serious()),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            )
+            with self.assertRaisesRegex(ValueError, "14 distinct queries"):
+                researcher.research(
+                    ResearchTask(
+                        id="T1",
+                        question="What does broad evidence show?",
+                        rationale="Cover distinct evidence paths",
+                        priority=Priority.HIGH,
+                        page_budget_share=0.25,
+                    )
+                )
+        self.assertEqual(2, model.calls.count("search_queries"))
+
     def test_page_content_is_delimited_as_untrusted_data(self) -> None:
         prompts: list[str] = []
         model = FakeModel(
