@@ -32,7 +32,7 @@ Default `dev` budget: 4 primary tasks, 2 follow-ups, 24 searches, 40 pages, 8 co
 python -m deep_research "Your question" --profile serious
 ```
 
-`serious` allows 100 searches, 600 pages, 12 concurrent fetches, and 30 minutes. CLI overrides remain bounded by absolute guards.
+`serious` allows 100 searches, 600 pages, 12 concurrent fetches, and 30 minutes. It screens broad results, then deeply extracts at most 30 ranked sources per task. CLI overrides remain bounded by absolute guards.
 
 ## Architecture
 

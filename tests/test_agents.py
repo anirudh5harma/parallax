@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from deep_research.audit import JsonlAuditLogger
 from deep_research.budget import BudgetConfig, BudgetManager
-from deep_research.models import FetchedPage, Priority, ResearchTask, SearchResult
+from deep_research.models import FetchedPage, Priority, ResearchTask, SearchResult, TaskStatus
 from deep_research.planner import InvalidResearchQuery, Planner
 from deep_research.researcher import FetchGate, Researcher, _Candidate, _select_candidates
 from deep_research.urls import UrlRegistry
@@ -154,6 +154,64 @@ class PlannerTests(unittest.TestCase):
 
 
 class ResearcherTests(unittest.TestCase):
+    def test_partial_page_failures_do_not_fail_a_productive_task(self) -> None:
+        class PartialExtractor:
+            def extract(
+                self,
+                urls: list[str],
+                *,
+                query: str,
+                timeout_seconds: float,
+            ) -> list[FetchedPage]:
+                del query, timeout_seconds
+                url = urls[0]
+                return [
+                    FetchedPage(
+                        url=url,
+                        normalized_url=normalize_url(url),
+                        domain=normalize_url(url).split("/")[2],
+                        title="Evidence",
+                        text="The source reports a measurable effect.",
+                        content_hash=hashlib.sha256(url.encode()).hexdigest(),
+                    )
+                ]
+
+        model = FakeModel(
+            {
+                "search_queries": {
+                    "queries": [{"query_text": "query", "rationale": "coverage"}]
+                },
+                "page_evidence": {"observations": []},
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            task = ResearchTask(
+                id="T1",
+                question="What does the evidence show?",
+                rationale="Test resilient extraction",
+                priority=Priority.HIGH,
+                page_budget_share=1,
+            )
+            result = Researcher(
+                model=model,
+                search=FakeSearch(
+                    [
+                        SearchResult("https://one.example/report", "One"),
+                        SearchResult("https://two.example/report", "Two"),
+                    ]
+                ),
+                fetcher=FakeFetcher(),
+                batch_extractor=PartialExtractor(),
+                budget=BudgetManager(BudgetConfig(max_pages=2)),
+                audit=JsonlAuditLogger(Path(tmp) / "events.jsonl"),
+                urls=UrlRegistry(),
+                fetch_gate=FetchGate(2),
+            ).research(task)
+
+        self.assertEqual(TaskStatus.COMPLETED, task.status)
+        self.assertEqual([], result.errors)
+        self.assertEqual(2, len(result.explorations))
+
     def test_serious_run_batch_extracts_only_ranked_shortlist(self) -> None:
         class Extractor:
             def __init__(self) -> None:

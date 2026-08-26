@@ -250,6 +250,7 @@ class Researcher:
         self._raise_if_cancelled(cancellation)
         task.status = TaskStatus.RUNNING
         errors: list[str] = []
+        search_failures: list[str] = []
         explorations: list[PageExploration] = []
         observations: list[EvidenceObservation] = []
         page_cap = max(1, math.ceil(self.budget.config.max_pages * task.page_budget_share))
@@ -280,11 +281,10 @@ class Researcher:
                     budget=self.budget.snapshot(),
                 )
             except BudgetExceeded as exc:
-                errors.append(str(exc))
                 self.audit.log("search.failed", task_id=task.id, error=str(exc))
                 break
             except ProviderError as exc:
-                errors.append(str(exc))
+                search_failures.append(str(exc))
                 self.audit.log("search.failed", task_id=task.id, error=str(exc))
                 continue
             for result in results:
@@ -342,7 +342,8 @@ class Researcher:
             prefetched, failed = self._batch_extract(task, candidates, cancellation)
             for exploration, error in failed:
                 explorations.append(exploration)
-                errors.append(error)
+            if candidates and not prefetched:
+                errors.append("no selected sources could be extracted")
 
         executor = ThreadPoolExecutor(max_workers=self.budget.config.max_concurrent_fetches)
         futures: list[Future[tuple[PageExploration, list[EvidenceObservation], str | None]]] = [
@@ -372,7 +373,12 @@ class Researcher:
                 if exploration.fetch_status is FetchStatus.FETCHED and error is None:
                     self.audit.log("page.explored", exploration=exploration)
                 if error:
-                    errors.append(error)
+                    self.audit.log(
+                        "page.processing_failed",
+                        task_id=task.id,
+                        normalized_url=exploration.normalized_url,
+                        error=error,
+                    )
         except TimeoutError:
             cancellation.set()
             errors.append("wall-clock timeout exhausted")
@@ -381,6 +387,8 @@ class Researcher:
                 future.cancel()
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+        if queries and search_failures and len(search_failures) == len(queries):
+            errors.append("all searches failed")
         if not cancellation.is_set():
             task.status = TaskStatus.COMPLETED if not errors else TaskStatus.FAILED
         return ResearchResult(
