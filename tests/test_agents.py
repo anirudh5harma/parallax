@@ -317,6 +317,45 @@ class ResearcherTests(unittest.TestCase):
         self.assertEqual("agency.gov", selected[0].domain)
         self.assertEqual(3, sum(item.domain == "blog.example" for item in selected))
 
+    def test_candidate_selection_demotes_social_and_commercial_forecasts(self) -> None:
+        candidates = [
+            _Candidate(
+                result=SearchResult(
+                    "https://www.linkedin.com/posts/example",
+                    "Industry commentary",
+                    "Long commentary " * 20,
+                ),
+                normalized_url="https://www.linkedin.com/posts/example",
+                domain="www.linkedin.com",
+                discovery_order=0,
+            ),
+            _Candidate(
+                result=SearchResult(
+                    "https://forecast.example/report",
+                    "Market Size, Market Share and CAGR Forecast Report",
+                    "Commercial forecast " * 20,
+                ),
+                normalized_url="https://forecast.example/report",
+                domain="forecast.example",
+                discovery_order=1,
+            ),
+            _Candidate(
+                result=SearchResult(
+                    "https://company.example/investor/filing",
+                    "Quarterly earnings filing",
+                    "Direct company disclosure " * 20,
+                ),
+                normalized_url="https://company.example/investor/filing",
+                domain="company.example",
+                discovery_order=2,
+            ),
+        ]
+
+        selected = _select_candidates(candidates, 3)
+
+        self.assertEqual("company.example", selected[0].domain)
+        self.assertEqual("www.linkedin.com", selected[-1].domain)
+
     def test_search_generation_retries_when_current_anchor_is_missing(self) -> None:
         calls = 0
 

@@ -69,15 +69,24 @@ def _source_quality(candidate: _Candidate) -> int:
         score += 2
     if len(candidate.result.snippet.strip()) >= 180:
         score += 1
-    if domain in {
+    low_signal_hosts = {
         "facebook.com",
         "instagram.com",
+        "linkedin.com",
+        "medium.com",
         "pinterest.com",
+        "quora.com",
         "reddit.com",
         "tiktok.com",
         "x.com",
         "youtube.com",
-    }:
+    }
+    if any(domain == host or domain.endswith(f".{host}") for host in low_signal_hosts):
+        score -= 10
+    commercial_forecast_cues = sum(
+        cue in title for cue in ("market size", "market share", "forecast", "cagr")
+    )
+    if commercial_forecast_cues >= 2:
         score -= 8
     return score
 
