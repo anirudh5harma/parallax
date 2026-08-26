@@ -135,7 +135,12 @@ def _post_json(
             public_message=public_message,
         ) from exc
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ProviderError(f"request failed: {type(exc).__name__}") from exc
+        code, public_message = _provider_transport_failure(url)
+        raise ProviderError(
+            f"request failed: {type(exc).__name__}",
+            code=code,
+            public_message=public_message,
+        ) from exc
     if not isinstance(data, dict):
         raise ProviderError("provider returned non-object JSON")
     return data
@@ -198,6 +203,15 @@ def _provider_http_failure(url: str, status: int, detail: str) -> tuple[str, str
                 "tavily_request_rejected",
                 "Web search rejected the request. Check the API configuration.",
             )
+        return "tavily_unavailable", "Web search is temporarily unavailable. Try again shortly."
+    return "provider_unavailable", "A research provider is temporarily unavailable."
+
+
+def _provider_transport_failure(url: str) -> tuple[str, str]:
+    host = urlsplit(url).hostname or ""
+    if host.startswith("bedrock-runtime."):
+        return "bedrock_unavailable", "Bedrock is temporarily unavailable. Try again shortly."
+    if host == "api.tavily.com":
         return "tavily_unavailable", "Web search is temporarily unavailable. Try again shortly."
     return "provider_unavailable", "A research provider is temporarily unavailable."
 
@@ -364,7 +378,7 @@ class BedrockConverseModel:
         region: str = "us-east-1",
         max_tokens: int = 4096,
         max_attempts: int = 2,
-        max_request_seconds: float = 60,
+        max_request_seconds: float = 120,
     ) -> None:
         _validate_api_key(api_key)
         if not model_id or not region:
@@ -422,13 +436,17 @@ class BedrockConverseModel:
         for attempt in range(self.max_attempts):
             remaining = operation_timeout - (time.monotonic() - started)
             if remaining <= 0:
-                raise ProviderError("model request timed out")
+                raise last_error or ProviderError(
+                    "model request timed out",
+                    code="bedrock_unavailable",
+                    public_message="Bedrock is temporarily unavailable. Try again shortly.",
+                )
             try:
                 response = _post_json(
                     endpoint,
                     payload,
                     {"Authorization": f"Bearer {self.api_key}"},
-                    remaining,
+                    min(60.0, remaining),
                 )
                 value = self._extract_json(response)
                 _validate_json_schema(value, schema)

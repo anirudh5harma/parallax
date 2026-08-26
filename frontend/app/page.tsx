@@ -87,7 +87,8 @@ function ErrorModal({ close, notice }: { close: () => void; notice: ErrorNotice 
 }
 
 function cleanReport(report: string, evidence: EvidenceClaim[]) {
-  const claimsByText = new Map(evidence.map((claim) => [claim.text, claim.claim_id]));
+  const displayClaimText = (text: string) => text.replace(/\[\s*S\d+\s*\]/g, '').replace(/\(\s*\)|\[\s*\]/g, '').replace(/\s+/g, ' ').trim();
+  const claimsByText = new Map(evidence.map((claim) => [displayClaimText(claim.text), claim.claim_id]));
   const output: string[] = [];
   let claimId: string | null = null;
   let claimSources: string[] = [];

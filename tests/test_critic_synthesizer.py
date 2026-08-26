@@ -13,7 +13,13 @@ from deep_research.domain.models import (
     Priority,
     ResearchTask,
 )
-from deep_research.agents.synthesizer import CitationError, build_synthesis_context, render_report
+from deep_research.agents.synthesizer import (
+    CitationError,
+    build_fallback_report_payload,
+    build_synthesis_context,
+    contextualize_remaining_gaps,
+    render_report,
+)
 from tests.fakes import FakeModel
 
 
@@ -28,6 +34,76 @@ def task(task_id: str = "T1") -> ResearchTask:
 
 
 class CriticSynthesizerTests(unittest.TestCase):
+    def test_synthesis_packet_caps_contested_claims_for_bounded_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            observations = []
+            for index in range(10):
+                statement = f"Contested claim {index}."
+                observations.extend(
+                    [
+                        EvidenceObservation(
+                            observation_id=f"OS{index}", task_id="T1",
+                            source_url=f"https://support{index}.example/a",
+                            source_domain=f"support{index}.example", statement=statement,
+                            polarity=Polarity.SUPPORT, excerpt="Measured effect.",
+                        ),
+                        EvidenceObservation(
+                            observation_id=f"OC{index}", task_id="T1",
+                            source_url=f"https://contradict{index}.example/b",
+                            source_domain=f"contradict{index}.example", statement=statement,
+                            polarity=Polarity.CONTRADICT, excerpt="No measured effect.",
+                        ),
+                    ]
+                )
+            ledger.add_observations(observations)
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            gaps = contextualize_remaining_gaps(
+                context,
+                ["gap " * 2_000, "gap two", "gap three", "gap four", "gap five", "gap six"],
+            )
+            fallback = build_fallback_report_payload(context, gaps)
+            report = render_report(
+                fallback,
+                context,
+                remaining_gaps=fallback["remaining_gaps"],
+            )
+
+        self.assertEqual(6, len(fallback["contested_findings"]))
+        self.assertEqual(4, context.omitted_contested_count)
+        self.assertEqual(6, len(gaps))
+        self.assertIn("4 additional contested findings", gaps[-1])
+        self.assertIn("## Contested Findings", report)
+        self.assertIn("4 additional contested findings", report)
+        self.assertLessEqual(len(report.split()), 1_800)
+
+    def test_fallback_bounds_long_contested_claim_titles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            observations = []
+            for index in range(6):
+                statement = f"Claim {index} " + "evidence " * 55
+                for prefix, polarity in (("support", Polarity.SUPPORT), ("oppose", Polarity.CONTRADICT)):
+                    observations.append(
+                        EvidenceObservation(
+                            observation_id=f"O{prefix}{index}", task_id="T1",
+                            source_url=f"https://{prefix}{index}.example/a",
+                            source_domain=f"{prefix}{index}.example", statement=statement,
+                            polarity=polarity, excerpt="Measured result.",
+                        )
+                    )
+            ledger.add_observations(observations)
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            fallback = build_fallback_report_payload(context, [])
+            report = render_report(
+                fallback,
+                context,
+                remaining_gaps=fallback["remaining_gaps"],
+            )
+
+        self.assertLess(len(fallback["contested_findings"]), 6)
+        self.assertLessEqual(len(report.split()), 1_800)
+
     def test_disputed_claim_cannot_render_as_main_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
@@ -228,7 +304,7 @@ class CriticSynthesizerTests(unittest.TestCase):
                     allow_followups=False,
                 )
 
-    def test_synthesis_rejects_unknown_source_id(self) -> None:
+    def test_synthesis_fallback_removes_unknown_source_id(self) -> None:
         model = FakeModel(
             {
                 "final_report": {
@@ -257,14 +333,16 @@ class CriticSynthesizerTests(unittest.TestCase):
                 ]
             )
             critic = CriticSynthesizer(model, BudgetManager(BudgetConfig()), audit)
-            with self.assertRaises(CitationError):
-                critic.synthesize(
-                    original_query="Query",
-                    tasks=[task()],
-                    claims=ledger.claims(),
-                    observations=ledger.observations(),
-                    remaining_gaps=[],
-                )
+            report = critic.synthesize(
+                original_query="Query",
+                tasks=[task()],
+                claims=ledger.claims(),
+                observations=ledger.observations(),
+                remaining_gaps=[],
+            )
+
+        self.assertNotIn("S99", report)
+        self.assertIn("- Sources: S1", report)
 
     def test_synthesis_repairs_cross_claim_citation(self) -> None:
         model = FakeModel({})
@@ -382,7 +460,7 @@ class CriticSynthesizerTests(unittest.TestCase):
         self.assertEqual(2, calls)
         self.assertIn("- Sources: S1", report)
 
-    def test_synthesis_repair_is_bounded_to_one_retry(self) -> None:
+    def test_synthesis_uses_safe_fallback_after_one_failed_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / "events.jsonl"
             audit = JsonlAuditLogger(event_path)
@@ -407,13 +485,12 @@ class CriticSynthesizerTests(unittest.TestCase):
             }
             model = FakeModel({"final_report": invalid})
 
-            with self.assertRaisesRegex(ValueError, "non-disputed claims"):
-                CriticSynthesizer(
-                    model, BudgetManager(BudgetConfig()), audit
-                ).synthesize(
-                    original_query="Query", tasks=[task()], claims=ledger.claims(),
-                    observations=ledger.observations(), remaining_gaps=[],
-                )
+            report = CriticSynthesizer(
+                model, BudgetManager(BudgetConfig()), audit
+            ).synthesize(
+                original_query="Query", tasks=[task()], claims=ledger.claims(),
+                observations=ledger.observations(), remaining_gaps=[],
+            )
 
             events = [json.loads(line) for line in event_path.read_text().splitlines()]
 
@@ -421,8 +498,13 @@ class CriticSynthesizerTests(unittest.TestCase):
         self.assertEqual(
             1, sum(event["event"] == "synthesis.validation_retry" for event in events)
         )
+        self.assertEqual(
+            1, sum(event["event"] == "synthesis.fallback_rendered" for event in events)
+        )
+        self.assertIn("X improves Y.", report)
+        self.assertIn("- Sources: S1", report)
 
-    def test_synthesis_rejects_uncited_claim_finding(self) -> None:
+    def test_synthesis_fallback_binds_uncited_claim_to_verified_source(self) -> None:
         model = FakeModel({})
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / "events.jsonl"
@@ -456,21 +538,21 @@ class CriticSynthesizerTests(unittest.TestCase):
                 "remaining_gaps": [],
             }
             critic = CriticSynthesizer(model, BudgetManager(BudgetConfig()), audit)
-            with self.assertRaises(CitationError):
-                critic.synthesize(
-                    original_query="Query",
-                    tasks=[task()],
-                    claims=ledger.claims(),
-                    observations=ledger.observations(),
-                    remaining_gaps=[],
-                )
+            report = critic.synthesize(
+                original_query="Query",
+                tasks=[task()],
+                claims=ledger.claims(),
+                observations=ledger.observations(),
+                remaining_gaps=[],
+            )
             events = [json.loads(line) for line in event_path.read_text().splitlines()]
 
         self.assertEqual(
             1, sum(event["event"] == "synthesis.validation_retry" for event in events),
         )
+        self.assertIn("- Sources: S1", report)
 
-    def test_synthesis_rejects_source_bound_to_another_claim(self) -> None:
+    def test_synthesis_fallback_never_keeps_cross_claim_source(self) -> None:
         model = FakeModel({})
         with tempfile.TemporaryDirectory() as tmp:
             audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
@@ -507,17 +589,19 @@ class CriticSynthesizerTests(unittest.TestCase):
                 "remaining_gaps": [],
             }
 
-            with self.assertRaises(CitationError):
-                CriticSynthesizer(
-                    model, BudgetManager(BudgetConfig()), audit
-                ).synthesize(
-                    original_query="Query", tasks=[task()], claims=claims,
-                    observations=ledger.observations(), remaining_gaps=[],
-                )
+            report = CriticSynthesizer(
+                model, BudgetManager(BudgetConfig()), audit
+            ).synthesize(
+                original_query="Query", tasks=[task()], claims=claims,
+                observations=ledger.observations(), remaining_gaps=[],
+            )
 
         self.assertEqual(2, model.calls.count("final_report"))
+        claim_section = report.split("### X improves Y.", 1)[1].split("###", 1)[0]
+        self.assertIn("- Sources: S1", claim_section)
+        self.assertNotIn("- Sources: S2", claim_section)
 
-    def test_synthesis_rejects_unbound_summary_citation(self) -> None:
+    def test_synthesis_fallback_removes_unbound_summary_citation(self) -> None:
         model = FakeModel({})
         with tempfile.TemporaryDirectory() as tmp:
             audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
@@ -543,14 +627,16 @@ class CriticSynthesizerTests(unittest.TestCase):
                 "remaining_gaps": [],
             }
             critic = CriticSynthesizer(model, BudgetManager(BudgetConfig()), audit)
-            with self.assertRaises(CitationError):
-                critic.synthesize(
-                    original_query="Query",
-                    tasks=[task()],
-                    claims=ledger.claims(),
-                    observations=ledger.observations(),
-                    remaining_gaps=[],
-                )
+            report = critic.synthesize(
+                original_query="Query",
+                tasks=[task()],
+                claims=ledger.claims(),
+                observations=ledger.observations(),
+                remaining_gaps=[],
+            )
+
+        self.assertNotIn("without a finding", report)
+        self.assertIn("- Sources: S1", report)
 
     def test_synthesis_renders_claim_local_sources(self) -> None:
         model = FakeModel({})
@@ -595,6 +681,61 @@ class CriticSynthesizerTests(unittest.TestCase):
             )
 
         self.assertIn("- Sources: S1", report)
+
+    def test_claim_heading_cannot_emit_unknown_citation_shaped_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://example.com/a", source_domain="example.com",
+                    statement="Evidence [S999] supports X.", polarity=Polarity.SUPPORT,
+                    excerpt="Measured effect.",
+                )]
+            )
+            claim = ledger.claims()[0]
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            report = render_report(
+                {
+                    "executive_summary": "Supported summary.",
+                    "main_findings": [{
+                        "claim_id": claim.claim_id,
+                        "synthesis": "Evidence supports X.",
+                        "source_ids": ["S1"],
+                    }],
+                    "contested_findings": [],
+                    "weak_evidence": [],
+                    "remaining_gaps": [],
+                },
+                context,
+            )
+
+        self.assertNotIn("S999", report)
+        self.assertIn("### Evidence supports X.", report)
+        self.assertIn("- S1: https://example.com/a", report)
+
+    def test_claim_heading_preserves_bare_product_model_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = JsonlAuditLogger(Path(tmp) / "events.jsonl")
+            ledger = EvidenceLedger(audit)
+            ledger.add_observations(
+                [EvidenceObservation(
+                    observation_id="O1", task_id="T1",
+                    source_url="https://example.com/a", source_domain="example.com",
+                    statement="Samsung Galaxy S24 supports satellite messaging.",
+                    polarity=Polarity.SUPPORT, excerpt="Satellite messaging is supported.",
+                )]
+            )
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            fallback = build_fallback_report_payload(context, [])
+            report = render_report(
+                fallback,
+                context,
+                remaining_gaps=fallback["remaining_gaps"],
+            )
+
+        self.assertIn("### Samsung Galaxy S24 supports satellite messaging.", report)
 
 
 if __name__ == "__main__":

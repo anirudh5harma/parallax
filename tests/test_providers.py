@@ -12,12 +12,30 @@ from deep_research.infrastructure.providers import (
     TavilyExtractClient,
     TavilySearchClient,
     _NoRedirectHandler,
+    _post_json,
     _provider_http_failure,
     provider_error_context,
 )
 
 
 class BedrockConverseModelTests(unittest.TestCase):
+    def test_transport_timeout_keeps_provider_identity(self) -> None:
+        cases = (
+            (
+                "https://bedrock-runtime.us-east-1.amazonaws.com/model/x/converse",
+                "bedrock_unavailable",
+            ),
+            ("https://api.tavily.com/search", "tavily_unavailable"),
+        )
+        for url, expected_code in cases:
+            with self.subTest(url=url), patch(
+                "deep_research.infrastructure.providers.urllib.request.build_opener"
+            ) as build_opener:
+                build_opener.return_value.open.side_effect = TimeoutError()
+                with self.assertRaises(ProviderError) as raised:
+                    _post_json(url, {}, {}, 1)
+            self.assertEqual(expected_code, raised.exception.code)
+
     def test_provider_failures_have_stable_public_codes(self) -> None:
         self.assertEqual(
             ("bedrock_access_denied", "Model access is unavailable. Check the Bedrock key, model access, and AWS region."),
@@ -102,6 +120,31 @@ class BedrockConverseModelTests(unittest.TestCase):
             )
 
         self.assertLessEqual(post.call_args.args[3], 60)
+
+    def test_retry_deadline_preserves_bedrock_failure_identity(self) -> None:
+        failure = ProviderError(
+            "timed out",
+            code="bedrock_unavailable",
+            public_message="Bedrock is temporarily unavailable. Try again shortly.",
+        )
+        with (
+            patch(
+                "deep_research.infrastructure.providers._post_json",
+                side_effect=failure,
+            ),
+            patch(
+                "deep_research.infrastructure.providers.time.monotonic",
+                side_effect=[0, 0, 9.9, 10.1],
+            ),
+            patch("deep_research.infrastructure.providers.time.sleep"),
+        ):
+            with self.assertRaises(ProviderError) as raised:
+                BedrockConverseModel("secret").generate_json(
+                    system_prompt="system", user_prompt="user", schema_name="result",
+                    schema=self._simple_schema(), timeout_seconds=10,
+                )
+
+        self.assertEqual("bedrock_unavailable", raised.exception.code)
 
     def test_retries_schema_violation_with_correction_guidance(self) -> None:
         too_long = {

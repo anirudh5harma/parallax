@@ -21,6 +21,7 @@ class SynthesisContext:
     source_urls: dict[str, str]
     claims_by_id: dict[str, EvidenceClaim]
     allowed_sources_by_claim: dict[str, set[str]]
+    omitted_contested_count: int
 
 
 def build_synthesis_context(
@@ -28,6 +29,8 @@ def build_synthesis_context(
     observations: list[EvidenceObservation],
     *,
     max_claims: int = 60,
+    max_contested_claims: int = 6,
+    max_contested_title_words: int = 300,
     max_sources_per_polarity: int = 5,
 ) -> SynthesisContext:
     urls = sorted({observation.source_url for observation in observations})
@@ -37,7 +40,7 @@ def build_synthesis_context(
         observation.observation_id: observation for observation in observations
     }
     confidence_rank = {"High": 0, "Moderate": 1, "Low": 2, "Insufficient": 3}
-    ranked = sorted(
+    ranked_claims = sorted(
         claims,
         key=lambda claim: (
             0 if claim.disagreement_flag else 1,
@@ -45,7 +48,20 @@ def build_synthesis_context(
             -claim.supporting_domain_count,
             claim.claim_id,
         ),
-    )[:max_claims]
+    )
+    contested_candidates = [claim for claim in ranked_claims if claim.disagreement_flag]
+    contested: list[EvidenceClaim] = []
+    contested_title_words = 0
+    for claim in contested_candidates:
+        title_words = len(claim.text.split())
+        if contested and contested_title_words + title_words > max_contested_title_words:
+            continue
+        contested.append(claim)
+        contested_title_words += title_words
+        if len(contested) >= max_contested_claims:
+            break
+    uncontested = [claim for claim in ranked_claims if not claim.disagreement_flag]
+    ranked = (contested + uncontested)[:max_claims]
     packet: list[dict[str, object]] = []
     allowed_sources_by_claim: dict[str, set[str]] = {}
     for claim in ranked:
@@ -97,6 +113,7 @@ def build_synthesis_context(
         source_urls=source_urls,
         claims_by_id={claim.claim_id: claim for claim in ranked},
         allowed_sources_by_claim=allowed_sources_by_claim,
+        omitted_contested_count=len(contested_candidates) - len(contested),
     )
 
 
@@ -125,15 +142,14 @@ def repair_report_citations(
             synthesis = str(item.get("synthesis", ""))
 
             def replace_citation(match: re.Match[str]) -> str:
-                source_id = re.search(r"S\d+", match.group(0))
-                if source_id and source_id.group(0) in allowed:
-                    valid_source_ids.add(source_id.group(0))
+                source_id = match.group(1)
+                if source_id in allowed:
+                    valid_source_ids.add(source_id)
                     return match.group(0)
-                if source_id:
-                    removed.add(source_id.group(0))
+                removed.add(source_id)
                 return ""
 
-            synthesis = re.sub(r"\[?\bS\d+\b\]?", replace_citation, synthesis)
+            synthesis = re.sub(r"\[\s*(S\d+)\s*\]", replace_citation, synthesis)
             synthesis = re.sub(r"\(\s*\)|\[\s*\]", "", synthesis)
             item["synthesis"] = " ".join(synthesis.split())
             item["source_ids"] = sorted(
@@ -150,6 +166,97 @@ def repair_report_citations(
     return repaired, repairs
 
 
+def build_fallback_report_payload(
+    context: SynthesisContext,
+    remaining_gaps: list[str],
+) -> dict[str, object]:
+    """Build a bounded, fully source-bound report when model repair remains invalid."""
+    main: list[dict[str, object]] = []
+    contested: list[dict[str, object]] = []
+    weak: list[dict[str, object]] = []
+    finding_word_budget = 900
+    finding_words = 0
+    for packet_claim in context.packet:
+        claim_id = str(packet_claim["claim_id"])
+        claim = context.claims_by_id[claim_id]
+        allowed = context.allowed_sources_by_claim[claim_id]
+        if not allowed:
+            continue
+        source_ids: list[str] = []
+        for polarity in ("support", "contradiction", "neutral"):
+            observations = packet_claim.get(polarity, [])
+            if not isinstance(observations, list):
+                continue
+            for observation in observations[:2]:
+                if not isinstance(observation, dict):
+                    continue
+                source_id = str(observation.get("source_id", ""))
+                if source_id in allowed and source_id not in source_ids:
+                    source_ids.append(source_id)
+        if not source_ids:
+            source_ids = sorted(allowed, key=lambda item: int(item[1:]))[:2]
+        statement = _truncate_words(_display_claim_text(claim.text), 35)
+        finding = {
+            "claim_id": claim_id,
+            "synthesis": (
+                f"Sources disagree about this finding: {statement}"
+                if claim.disagreement_flag
+                else statement
+            ),
+            "source_ids": source_ids,
+        }
+        if claim.disagreement_flag:
+            contested.append(finding)
+            finding_words += len(claim.text.split()) + len(statement.split()) + 20
+        elif finding_words + len(claim.text.split()) + len(statement.split()) + 20 > finding_word_budget:
+            continue
+        elif claim.confidence_tag.value == "Insufficient":
+            if len(weak) < 4:
+                weak.append(finding)
+                finding_words += len(claim.text.split()) + len(statement.split()) + 20
+        elif len(main) < 8:
+            main.append(finding)
+            finding_words += len(claim.text.split()) + len(statement.split()) + 20
+
+    summary_items = [*main[:2], *contested[:1], *weak[:1]]
+    summary = _truncate_words(
+        " ".join(str(item["synthesis"]) for item in summary_items),
+        100,
+    ) or "Available evidence is insufficient to support a reliable answer."
+    return {
+        "executive_summary": summary,
+        "main_findings": main,
+        "contested_findings": contested,
+        "weak_evidence": weak,
+        "remaining_gaps": [_truncate_words(gap, 40) for gap in remaining_gaps[:6]],
+    }
+
+
+def contextualize_remaining_gaps(
+    context: SynthesisContext,
+    remaining_gaps: list[str],
+) -> list[str]:
+    gaps = [_truncate_words(gap, 40) for gap in remaining_gaps]
+    if context.omitted_contested_count:
+        notice = (
+            f"{context.omitted_contested_count} additional contested findings "
+            "remain outside this concise report."
+        )
+        return [*gaps[:5], notice]
+    return gaps[:6]
+
+
+def _truncate_words(value: str, limit: int) -> str:
+    words = value.split()
+    return " ".join(words[:limit]) + ("…" if len(words) > limit else "")
+
+
+def _display_claim_text(value: str) -> str:
+    without_ids = re.sub(r"\[\s*S\d+\s*\]", "", value)
+    without_empty_marks = re.sub(r"\(\s*\)|\[\s*\]", "", without_ids)
+    return " ".join(without_empty_marks.split())
+
+
 def render_report(
     payload: dict[str, object],
     context: SynthesisContext,
@@ -161,13 +268,11 @@ def render_report(
         key: value for key, value in payload.items() if key != "remaining_gaps"
     }
     serialized = json.dumps(citation_payload, ensure_ascii=False)
-    cited_in_text = set(re.findall(r"\bS\d+\b", serialized))
+    cited_in_text = _inline_source_ids(serialized)
     unknown = cited_in_text - set(context.source_urls)
     if unknown:
         raise CitationError(f"unknown source IDs: {sorted(unknown)}")
-    summary_citations = set(
-        re.findall(r"\bS\d+\b", str(payload.get("executive_summary", "")))
-    )
+    summary_citations = _inline_source_ids(str(payload.get("executive_summary", "")))
     if summary_citations:
         raise CitationError("executive summary cannot contain unscoped source IDs")
 
@@ -206,7 +311,7 @@ def render_report(
             claim = _validated_claim_item(item, context, cited)
             sections.extend(
                 [
-                    f"### {claim.text}",
+                    f"### {_display_claim_text(claim.text)}",
                     "",
                     f"- Confidence: {claim.confidence_tag.value}",
                     f"- Support: {claim.supporting_domain_count} distinct domains",
@@ -295,7 +400,7 @@ def _render_claim_findings(
         claim = _validated_claim_item(item, context, cited)
         sections.extend(
             [
-                f"### {claim.text}",
+                f"### {_display_claim_text(claim.text)}",
                 "",
                 f"- Confidence: {claim.confidence_tag.value}",
                 f"- Support: {claim.supporting_domain_count} distinct domains",
@@ -322,7 +427,7 @@ def _validated_claim_item(
         not isinstance(source_id, str) for source_id in source_ids
     ):
         raise CitationError("source_ids must be a string list")
-    text_source_ids = set(re.findall(r"\bS\d+\b", str(item.get("synthesis", ""))))
+    text_source_ids = _inline_source_ids(str(item.get("synthesis", "")))
     claim_source_ids = set(source_ids) | text_source_ids
     if not claim_source_ids:
         raise CitationError(f"claim finding has no citation: {claim_id}")
@@ -338,6 +443,10 @@ def _validated_claim_item(
 def _claim_source_ids(item: dict[str, object]) -> list[str]:
     source_ids = {
         *[str(source_id) for source_id in item.get("source_ids", [])],
-        *re.findall(r"\bS\d+\b", str(item.get("synthesis", ""))),
+        *_inline_source_ids(str(item.get("synthesis", ""))),
     }
     return sorted(source_ids, key=lambda source_id: int(source_id[1:]))
+
+
+def _inline_source_ids(value: str) -> set[str]:
+    return set(re.findall(r"\[\s*(S\d+)\s*\]", value))

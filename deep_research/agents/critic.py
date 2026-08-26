@@ -15,7 +15,9 @@ from ..domain.models import (
 from ..infrastructure.audit import JsonlAuditLogger
 from ..infrastructure.providers import StructuredModel
 from .synthesizer import (
+    build_fallback_report_payload,
     build_synthesis_context,
+    contextualize_remaining_gaps,
     render_report,
     repair_report_citations,
 )
@@ -280,6 +282,7 @@ class CriticSynthesizer:
             budget=self.budget.snapshot(),
         )
         context = build_synthesis_context(claims, observations)
+        synthesis_gaps = contextualize_remaining_gaps(context, remaining_gaps)
         if not claims:
             payload: dict[str, object] = {
                 "executive_summary": (
@@ -289,9 +292,9 @@ class CriticSynthesizer:
                 "main_findings": [],
                 "contested_findings": [],
                 "weak_evidence": [],
-                "remaining_gaps": remaining_gaps,
+                "remaining_gaps": synthesis_gaps,
             }
-            report = render_report(payload, context, remaining_gaps=remaining_gaps)
+            report = render_report(payload, context, remaining_gaps=synthesis_gaps)
             self.audit.log(
                 "synthesis.completed",
                 report_word_count=len(report.split()),
@@ -313,7 +316,7 @@ class CriticSynthesizer:
         report_input = {
             "original_query": original_query,
             "structured_claims": context.packet,
-            "remaining_gaps": remaining_gaps,
+            "remaining_gaps": synthesis_gaps,
         }
         schema = _report_schema(
             sorted(context.claims_by_id),
@@ -330,7 +333,7 @@ class CriticSynthesizer:
         if citation_repairs:
             self.audit.log("synthesis.citations_repaired", repairs=citation_repairs)
         try:
-            report = render_report(payload, context, remaining_gaps=remaining_gaps)
+            report = render_report(payload, context, remaining_gaps=synthesis_gaps)
         except ValueError as exc:
             self.audit.log(
                 "synthesis.validation_retry",
@@ -355,7 +358,27 @@ class CriticSynthesizer:
             payload, citation_repairs = repair_report_citations(payload, context)
             if citation_repairs:
                 self.audit.log("synthesis.citations_repaired", repairs=citation_repairs)
-            report = render_report(payload, context, remaining_gaps=remaining_gaps)
+            try:
+                report = render_report(payload, context, remaining_gaps=synthesis_gaps)
+            except ValueError as final_error:
+                fallback = build_fallback_report_payload(context, synthesis_gaps)
+                report = render_report(
+                    fallback,
+                    context,
+                    remaining_gaps=fallback["remaining_gaps"],
+                )
+                self.audit.log(
+                    "synthesis.fallback_rendered",
+                    reason=" ".join(str(final_error).split())[:300],
+                    finding_count=sum(
+                        len(fallback[section])
+                        for section in (
+                            "main_findings",
+                            "contested_findings",
+                            "weak_evidence",
+                        )
+                    ),
+                )
         self.audit.log(
             "synthesis.completed",
             report_word_count=len(report.split()),
