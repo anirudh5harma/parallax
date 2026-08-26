@@ -1,6 +1,8 @@
 'use client';
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ApiError, EvidenceClaim, Observation, SessionDetail, SessionStatus, SessionSummary, api, eventStreamUrl } from '../lib/api';
@@ -156,9 +158,11 @@ function SessionItem({ session, active, depth, onClick }: { session: SessionSumm
 }
 
 export default function Home() {
+  const router = useRouter();
   const [query, setQuery] = useState('');
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [composing, setComposing] = useState(false);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [streamedReport, setStreamedReport] = useState('');
@@ -172,7 +176,7 @@ export default function Home() {
   const streamRef = useRef<EventSource | null>(null);
   const activeIdRef = useRef<string | null>(null);
   const seenEventsRef = useRef(new Set<string>());
-  const active = sessions.find((item) => item.id === activeId) ?? null;
+  const active = composing ? null : sessions.find((item) => item.id === activeId) ?? null;
   const orderedSessions = useMemo(() => sessionTree(sessions), [sessions]);
   const refreshSessions = useCallback(async () => { const items = await api.sessions(); setSessions(items); return items; }, []);
   const loadDetail = useCallback(async (id: string) => { const value = await api.session(id); if (activeIdRef.current === id) { setDetail(value); if (value.report) setStreamedReport(value.report); } return value; }, []);
@@ -196,7 +200,7 @@ export default function Home() {
       if (data.message && activeIdRef.current === session.id) setActivity((items) => [...items, { id: `${session.id}-${event.lastEventId}`, message: data.message!, sourceDomain: data.source_domain, stage: data.stage, taskId: data.task_id, tone }]);
     };
     stream.addEventListener('session.created', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (data) push(data, event); });
-    stream.addEventListener('plan.ready', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; push(data, event, 'done'); if (!replayingTerminal) { updateSession(session.id, { status: 'ready', plan: data.tasks ?? [] }); closedIntentionally = true; stream.close(); await loadDetail(session.id); } });
+    stream.addEventListener('plan.ready', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data || session.status !== 'planning') return; push(data, event, 'done'); if (!replayingTerminal) { updateSession(session.id, { status: 'ready', plan: data.tasks ?? [] }); closedIntentionally = true; stream.close(); await loadDetail(session.id); } });
     stream.addEventListener('plan.rejected', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; push(data, event, 'warning'); closedIntentionally = true; stream.close(); if (!replayingTerminal) { updateSession(session.id, { status: 'rejected', error: data.message ?? 'Please rewrite the question.' }); await loadDetail(session.id); } });
     stream.addEventListener('session.started', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; if (!replayingTerminal) updateSession(session.id, { status: 'running' }); push(data, event); });
     stream.addEventListener('research.progress', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (data) push(data, event); });
@@ -208,12 +212,12 @@ export default function Home() {
   }, [loadDetail, refreshSessions, updateSession]);
 
   useEffect(() => {
-    Promise.all([api.health(), api.sessions()]).then(([health, items]) => { setConfigured(health.configured); setSessions(items); if (items[0]) { activeIdRef.current = items[0].id; setActiveId(items[0].id); connect(items[0]); } }).catch((cause: unknown) => setError(errorNotice(cause, 'Research service unavailable', () => window.location.reload())));
+    Promise.all([api.health(), api.sessions()]).then(([health, items]) => { setConfigured(health.configured); setSessions(items); const wantsComposer = new URLSearchParams(window.location.search).has('new'); setComposing(wantsComposer); if (items[0] && !wantsComposer) { activeIdRef.current = items[0].id; setActiveId(items[0].id); connect(items[0]); } }).catch((cause: unknown) => setError(errorNotice(cause, 'Research service unavailable', () => window.location.reload())));
     return () => streamRef.current?.close();
   }, [connect]);
 
   function selectSession(session: SessionSummary) {
-    streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = session.id; setActiveId(session.id); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); connect(session);
+    window.history.replaceState(null, '', '/'); streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = session.id; setActiveId(session.id); setComposing(false); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); connect(session);
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); await createPlan();
@@ -236,11 +240,11 @@ export default function Home() {
     catch (cause) { setError(errorNotice(cause, 'Evidence path could not start', () => void startBranch(observation))); }
     finally { setBranching(null); }
   }
-  function newResearch() { streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = null; setActiveId(null); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); }
+  function newResearch() { router.push('/?new=1'); streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = null; setActiveId(null); setComposing(true); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); }
   const openCitation = useCallback((claimId: string, sourceId: string) => { const selection = findCitation(detail?.evidence ?? [], claimId, sourceId); if (selection) setDrawer(selection); }, [detail]);
 
   return <main className="shell">
-    <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}><div className="brand"><span className="brand-orbit" aria-hidden="true" /><strong>Parallax</strong></div><button className="new-thread" onClick={newResearch} type="button"><span>＋</span> New research</button><p className="sidebar-label">Your research</p><nav className="history" aria-label="Research history">{orderedSessions.length === 0 && <p className="history-empty">Research sessions will appear here.</p>}{orderedSessions.map(({ session, depth }) => <SessionItem active={activeId === session.id} depth={depth} key={session.id} onClick={() => selectSession(session)} session={session} />)}</nav></aside>
+    <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}><div className="brand"><span className="brand-orbit" aria-hidden="true" /><strong>Parallax</strong></div><Link className="new-thread" href="/?new=1" onClick={(event) => { event.preventDefault(); newResearch(); }}><span>＋</span> New research</Link><p className="sidebar-label">Your research</p><nav className="history" aria-label="Research history">{orderedSessions.length === 0 && <p className="history-empty">Research sessions will appear here.</p>}{orderedSessions.map(({ session, depth }) => <SessionItem active={activeId === session.id} depth={depth} key={session.id} onClick={() => selectSession(session)} session={session} />)}</nav></aside>
     <button className="mobile-menu" onClick={() => setSidebarOpen((value) => !value)} type="button" aria-label="Toggle research history">☰</button>
     <section className="main-column">{!active ? <Welcome query={query} setQuery={setQuery} submit={submit} busy={busy} configured={configured} /> : <ResearchConversation active={active} activity={activity} busy={busy} detail={detail} newResearch={newResearch} openCitation={openCitation} report={renderedReport} setView={setView} startResearch={startResearch} view={view} />}</section>
     {drawer && <EvidenceDrawer branching={branching} close={() => setDrawer(null)} selection={drawer} startBranch={startBranch} />}
