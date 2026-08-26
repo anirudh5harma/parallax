@@ -264,6 +264,29 @@ class HttpPageFetcherSecurityTests(unittest.TestCase):
             with self.assertRaisesRegex(ProviderError, "PDF exceeds byte limit"):
                 fetcher.fetch("https://example.com/paper.pdf", timeout_seconds=5)
 
+    def test_pdf_extraction_waits_on_a_separate_bounded_slot(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/pdf"
+        fetcher = HttpPageFetcher(
+            max_concurrent_pdf_extractions=1,
+            max_pdf_parse_seconds=0.01,
+        )
+        self.assertTrue(fetcher._pdf_slots.acquire(blocking=False))
+        try:
+            with (
+                patch.object(
+                    fetcher,
+                    "_fetch_once",
+                    return_value=(200, headers, b"%PDF-1.7"),
+                ),
+                patch("deep_research.providers.extract_pdf") as extract,
+            ):
+                with self.assertRaisesRegex(ProviderError, "capacity unavailable"):
+                    fetcher.fetch("https://example.com/paper.pdf", timeout_seconds=1)
+            extract.assert_not_called()
+        finally:
+            fetcher._pdf_slots.release()
+
     def test_redirect_preserves_server_required_trailing_slash(self) -> None:
         headers = Message()
         headers["Location"] = "/directory/"

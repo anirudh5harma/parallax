@@ -16,7 +16,7 @@ from pypdf.errors import PdfReadError
 MIN_PDF_TEXT_CHARACTERS = 80
 MIN_ALPHANUMERIC_RATIO = 0.25
 MAX_REPLACEMENT_CHARACTER_RATIO = 0.01
-PDF_WORKER_MEMORY_BYTES = 768 * 1024 * 1024
+PDF_WORKER_MEMORY_BYTES = 512 * 1024 * 1024
 
 
 class PdfExtractionError(RuntimeError):
@@ -135,11 +135,15 @@ def _extract_pdf_inline(
         for page in reader.pages:
             if remaining <= 0:
                 break
-            text = _normalize_text(page.extract_text() or "")
+            separator_size = 2 if page_texts else 0
+            available = remaining - separator_size
+            if available <= 0:
+                break
+            text = _normalize_text(page.extract_text() or "", max_chars=available)
             if not text:
                 continue
-            page_texts.append(text[:remaining])
-            remaining -= len(page_texts[-1])
+            page_texts.append(text)
+            remaining -= len(text) + separator_size
     except (PdfReadError, OSError, TypeError, ValueError) as exc:
         raise PdfExtractionError("PDF text extraction failed") from exc
 
@@ -154,23 +158,42 @@ def _extract_pdf_inline(
     return PdfExtraction(text=text, title=title, page_count=page_count)
 
 
-def _normalize_text(value: str) -> str:
-    without_controls = "".join(
-        character
-        for character in value
-        if unicodedata.category(character) not in {"Cc", "Cs"}
-        or character in "\n\t"
-    )
-    return " ".join(without_controls.split())
+def _normalize_text(value: str, *, max_chars: int | None = None) -> str:
+    output: list[str] = []
+    pending_space = False
+    for character in value:
+        if (
+            unicodedata.category(character) in {"Cc", "Cs"}
+            and character not in "\n\t"
+        ):
+            continue
+        if character.isspace():
+            pending_space = bool(output)
+            continue
+        if pending_space:
+            output.append(" ")
+            pending_space = False
+            if max_chars is not None and len(output) >= max_chars:
+                break
+        output.append(character)
+        if max_chars is not None and len(output) >= max_chars:
+            break
+    return "".join(output)
 
 
 def _validate_text_quality(text: str) -> None:
-    compact = [character for character in text if not character.isspace()]
-    if len(compact) < MIN_PDF_TEXT_CHARACTERS:
+    compact_count = 0
+    alphanumeric_count = 0
+    replacement_count = 0
+    for character in text:
+        if character.isspace():
+            continue
+        compact_count += 1
+        alphanumeric_count += character.isalnum()
+        replacement_count += character == "\ufffd"
+    if compact_count < MIN_PDF_TEXT_CHARACTERS:
         raise PdfExtractionError("PDF has no extractable text")
-    alphanumeric = sum(character.isalnum() for character in compact)
-    if alphanumeric / len(compact) < MIN_ALPHANUMERIC_RATIO:
+    if alphanumeric_count / compact_count < MIN_ALPHANUMERIC_RATIO:
         raise PdfExtractionError("PDF extracted text is low-signal")
-    replacements = text.count("\ufffd")
-    if replacements / len(compact) > MAX_REPLACEMENT_CHARACTER_RATIO:
+    if replacement_count / compact_count > MAX_REPLACEMENT_CHARACTER_RATIO:
         raise PdfExtractionError("PDF extracted text is low-signal")

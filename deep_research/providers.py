@@ -9,6 +9,7 @@ import math
 import re
 import socket
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -423,6 +424,7 @@ class HttpPageFetcher:
         max_pdf_pages: int = 150,
         max_pdf_chars: int = 120_000,
         max_pdf_parse_seconds: float = 15,
+        max_concurrent_pdf_extractions: int = 1,
         max_redirects: int = 3,
     ) -> None:
         if min(
@@ -431,6 +433,7 @@ class HttpPageFetcher:
             max_pdf_pages,
             max_pdf_chars,
             max_pdf_parse_seconds,
+            max_concurrent_pdf_extractions,
         ) <= 0:
             raise ValueError("fetch limits must be positive")
         self.max_bytes = max_bytes
@@ -438,6 +441,7 @@ class HttpPageFetcher:
         self.max_pdf_pages = max_pdf_pages
         self.max_pdf_chars = max_pdf_chars
         self.max_pdf_parse_seconds = max_pdf_parse_seconds
+        self._pdf_slots = threading.BoundedSemaphore(max_concurrent_pdf_extractions)
         self.max_redirects = max_redirects
 
     def fetch(self, url: str, *, timeout_seconds: float) -> FetchedPage:
@@ -460,8 +464,9 @@ class HttpPageFetcher:
                 raise ProviderError(f"page HTTP error: {status}")
             content_type = headers.get_content_type().casefold()
             pdf_hint = self._is_pdf_hint(current_url, headers)
-            is_pdf = pdf_hint or self._looks_like_pdf(raw)
-            if pdf_hint and not self._looks_like_pdf(raw):
+            pdf_signature = self._looks_like_pdf(raw)
+            is_pdf = pdf_hint or pdf_signature
+            if pdf_hint and not pdf_signature:
                 raise ProviderError("invalid PDF signature")
             if not is_pdf and content_type not in {"text/html", "text/plain"}:
                 raise ProviderError(f"unsupported content type: {content_type}")
@@ -476,15 +481,21 @@ class HttpPageFetcher:
             raise ProviderError(f"{kind} exceeds byte limit")
         if is_pdf:
             remaining = timeout_seconds - (time.monotonic() - started)
+            parse_timeout = min(self.max_pdf_parse_seconds, remaining)
+            if not self._pdf_slots.acquire(timeout=max(0, parse_timeout)):
+                raise ProviderError("PDF extraction capacity unavailable")
             try:
-                extraction = extract_pdf(
-                    raw,
-                    timeout_seconds=min(self.max_pdf_parse_seconds, remaining),
-                    max_pages=self.max_pdf_pages,
-                    max_chars=self.max_pdf_chars,
-                )
-            except PdfExtractionError as exc:
-                raise ProviderError(str(exc)) from exc
+                try:
+                    extraction = extract_pdf(
+                        raw,
+                        timeout_seconds=parse_timeout,
+                        max_pages=self.max_pdf_pages,
+                        max_chars=self.max_pdf_chars,
+                    )
+                except PdfExtractionError as exc:
+                    raise ProviderError(str(exc)) from exc
+            finally:
+                self._pdf_slots.release()
             text = extraction.text
             title = extraction.title
         else:

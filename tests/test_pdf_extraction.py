@@ -95,6 +95,15 @@ class PdfExtractionTests(unittest.TestCase):
                 max_chars=10_000,
             )
 
+    def test_caps_output_including_page_separators(self) -> None:
+        result = _extract_pdf_inline(
+            make_pdf("A sufficiently detailed evidence statement", pages=4),
+            max_pages=10,
+            max_chars=100,
+        )
+
+        self.assertLessEqual(len(result.text), 100)
+
 
 if __name__ == "__main__":
     unittest.main()
