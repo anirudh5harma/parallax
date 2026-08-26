@@ -907,7 +907,10 @@ class ResearcherTests(unittest.TestCase):
 
         selected = _select_candidates(candidates, 3)
 
-        self.assertEqual(["company.example"], [item.domain for item in selected])
+        self.assertEqual(
+            ["company.example", "forecast.example", "www.linkedin.com"],
+            [item.domain for item in selected],
+        )
 
     def test_search_generation_retries_when_current_anchor_is_missing(self) -> None:
         calls = 0

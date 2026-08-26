@@ -108,33 +108,41 @@ def _source_quality(candidate: _Candidate) -> int:
 def _select_candidates(candidates: list[_Candidate], limit: int) -> list[_Candidate]:
     """Prefer stronger results while preserving query and domain breadth."""
     ranked = sorted(
-        (candidate for candidate in candidates if _source_quality(candidate) > -8),
+        candidates,
         key=lambda candidate: (-_source_quality(candidate), candidate.discovery_order),
     )
-    by_query: dict[int, list[_Candidate]] = {}
-    for candidate in ranked:
-        by_query.setdefault(candidate.query_index, []).append(candidate)
     selected: list[_Candidate] = []
-    deferred: list[_Candidate] = []
     domain_counts: dict[str, int] = {}
-    while by_query and len(selected) < limit:
-        for query_index in sorted(by_query):
-            queue = by_query[query_index]
-            chosen: _Candidate | None = None
-            while queue and chosen is None:
-                candidate = queue.pop(0)
-                if domain_counts.get(candidate.domain, 0) >= 3:
-                    deferred.append(candidate)
-                else:
-                    chosen = candidate
-            if not queue:
-                by_query.pop(query_index, None)
-            if chosen is not None:
-                selected.append(chosen)
-                domain_counts[chosen.domain] = domain_counts.get(chosen.domain, 0) + 1
-                if len(selected) == limit:
-                    return selected
-    selected.extend(deferred[: max(0, limit - len(selected))])
+
+    def add_tier(items: list[_Candidate]) -> None:
+        by_query: dict[int, list[_Candidate]] = {}
+        for candidate in items:
+            by_query.setdefault(candidate.query_index, []).append(candidate)
+        deferred: list[_Candidate] = []
+        while by_query and len(selected) < limit:
+            for query_index in sorted(by_query):
+                queue = by_query[query_index]
+                chosen: _Candidate | None = None
+                while queue and chosen is None:
+                    candidate = queue.pop(0)
+                    if domain_counts.get(candidate.domain, 0) >= 3:
+                        deferred.append(candidate)
+                    else:
+                        chosen = candidate
+                if not queue:
+                    by_query.pop(query_index, None)
+                if chosen is not None:
+                    selected.append(chosen)
+                    domain_counts[chosen.domain] = domain_counts.get(chosen.domain, 0) + 1
+                    if len(selected) == limit:
+                        return
+        for candidate in deferred[: max(0, limit - len(selected))]:
+            selected.append(candidate)
+            domain_counts[candidate.domain] = domain_counts.get(candidate.domain, 0) + 1
+
+    add_tier([candidate for candidate in ranked if _source_quality(candidate) > -8])
+    if len(selected) < limit:
+        add_tier([candidate for candidate in ranked if _source_quality(candidate) <= -8])
     return selected
 
 
