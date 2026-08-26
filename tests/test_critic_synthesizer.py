@@ -35,6 +35,103 @@ def task(task_id: str = "T1") -> ResearchTask:
 
 
 class CriticSynthesizerTests(unittest.TestCase):
+    def test_contested_synthesis_removes_duplicated_clause_starters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            statement = "The productivity benefit differs by developer experience."
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1",
+                        task_id="T1",
+                        source_url="https://support.example/a",
+                        source_domain="support.example",
+                        statement=statement,
+                        polarity=Polarity.SUPPORT,
+                        excerpt="Junior developers completed tasks faster.",
+                    ),
+                    EvidenceObservation(
+                        observation_id="O2",
+                        task_id="T1",
+                        source_url="https://contradict.example/a",
+                        source_domain="contradict.example",
+                        statement=statement,
+                        polarity=Polarity.CONTRADICT,
+                        excerpt="Senior developers gained as much as junior developers.",
+                    ),
+                ]
+            )
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            claim_id = context.packet[0]["claim_id"]
+            payload = {
+                "executive_summary": "Summary.",
+                "main_findings": [],
+                "contested_findings": [{
+                    "claim_id": claim_id,
+                    "synthesis": (
+                        "Evidence points in different directions on whether The "
+                        "productivity benefit differs by developer experience."
+                    ),
+                    "source_ids": sorted(context.allowed_sources_by_claim[str(claim_id)]),
+                }],
+                "weak_evidence": [],
+                "remaining_gaps": [],
+            }
+
+            report = render_report(payload, context, remaining_gaps=[])
+
+        self.assertIn("on whether the productivity benefit", report)
+        self.assertNotIn("on whether The", report)
+
+    def test_contested_synthesis_preserves_conditional_when_clause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))
+            statement = "When interest rates rise, housing demand falls."
+            ledger.add_observations(
+                [
+                    EvidenceObservation(
+                        observation_id="O1",
+                        task_id="T1",
+                        source_url="https://support.example/a",
+                        source_domain="support.example",
+                        statement=statement,
+                        polarity=Polarity.SUPPORT,
+                        excerpt="Demand fell after rates rose.",
+                    ),
+                    EvidenceObservation(
+                        observation_id="O2",
+                        task_id="T1",
+                        source_url="https://contradict.example/a",
+                        source_domain="contradict.example",
+                        statement=statement,
+                        polarity=Polarity.CONTRADICT,
+                        excerpt="Demand held after rates rose.",
+                    ),
+                ]
+            )
+            context = build_synthesis_context(ledger.claims(), ledger.observations())
+            claim_id = context.packet[0]["claim_id"]
+            payload = {
+                "executive_summary": "Summary.",
+                "main_findings": [],
+                "contested_findings": [{
+                    "claim_id": claim_id,
+                    "synthesis": (
+                        "Evidence points in different directions on whether When "
+                        "interest rates rise, housing demand falls."
+                    ),
+                    "source_ids": sorted(context.allowed_sources_by_claim[str(claim_id)]),
+                }],
+                "weak_evidence": [],
+                "remaining_gaps": [],
+            }
+
+            report = render_report(payload, context, remaining_gaps=[])
+
+        self.assertIn(
+            "Evidence differs on this proposition: When interest rates rise", report
+        )
+
     def test_synthesis_packet_balances_planner_task_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = EvidenceLedger(JsonlAuditLogger(Path(tmp) / "events.jsonl"))

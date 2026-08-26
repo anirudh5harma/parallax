@@ -650,7 +650,13 @@ def _polarity_safe_synthesis(
         return f"Available sources contradict this proposition: {statement}"
     if not has_support:
         return f"Evidence is insufficient to establish whether {statement}"
-    return str(item.get("synthesis", "Evidence remains insufficient."))
+    synthesis = str(item.get("synthesis", "Evidence remains insufficient."))
+    synthesis = re.sub(r"\bon whether The\b", "on whether the", synthesis)
+    return re.sub(
+        r"\bEvidence points in different directions on whether When\b",
+        "Evidence differs on this proposition: When",
+        synthesis,
+    )
 
 
 def _claim_source_ids(item: dict[str, object]) -> list[str]:
