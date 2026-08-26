@@ -3,11 +3,12 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { EvidenceClaim, Observation, SessionDetail, SessionStatus, SessionSummary, api, eventStreamUrl } from '../lib/api';
+import { ApiError, EvidenceClaim, Observation, SessionDetail, SessionStatus, SessionSummary, api, eventStreamUrl } from '../lib/api';
 
 type View = 'answer' | 'process';
 type Activity = { id: string; message: string; stage?: string; sourceDomain?: string; taskId?: string; tone?: 'warning' | 'done' };
 type DrawerSelection = { claim: EvidenceClaim; observation: Observation };
+type ErrorNotice = { title: string; body: string; code?: string; retry?: () => void };
 const examples = [
   'How effective are GLP-1 medicines for long-term weight management, and where does evidence disagree?',
   'Does a four-day workweek improve productivity without increasing burnout?',
@@ -24,6 +25,63 @@ function sourceIcon(domain: string) {
   let hue = 0;
   for (const character of domain) hue = (hue * 31 + character.charCodeAt(0)) % 360;
   return { initial: label[0]?.toUpperCase() ?? '·', hue };
+}
+
+function errorNotice(cause: unknown, fallback: string, retry?: () => void): ErrorNotice {
+  const apiError = cause instanceof ApiError ? cause : null;
+  const message = apiError?.message ?? (cause instanceof Error ? cause.message : fallback);
+  const signature = `${apiError?.code ?? ''} ${apiError?.provider ?? ''} ${message}`.toLowerCase();
+  const retryAction = apiError?.retryable === false ? undefined : retry;
+
+  if (/tavily/.test(signature) && /(quota|credit|exhaust|limit)/.test(signature)) {
+    return { title: 'Search credits exhausted', body: 'Search provider allowance has been reached. Update its plan or credits before starting more research.', code: apiError?.code ?? undefined };
+  }
+  if (/(bedrock|model|anthropic)/.test(signature) && /(quota|credit|exhaust|limit)/.test(signature)) {
+    return { title: 'Model usage limit reached', body: 'Model provider allowance has been reached. Update its billing or limits, then try again.', code: apiError?.code ?? undefined };
+  }
+  if (/tavily/.test(signature) && /(access.denied|unauthori|invalid.key|authentication)/.test(signature)) {
+    return { title: 'Search access unavailable', body: 'Check configured search provider credentials, then restart the research service.', code: apiError?.code ?? undefined };
+  }
+  if (/(bedrock|model|anthropic)/.test(signature) && /(access.denied|not.available|model.access|unsupported.model)/.test(signature)) {
+    return { title: 'Model access unavailable', body: 'Configured model is not available to this account. Choose an enabled model or update model access.', code: apiError?.code ?? undefined };
+  }
+  if (/daily anonymous/.test(signature)) {
+    return { title: 'Daily research limit reached', body: 'This workspace has used its research allowance for today.', code: apiError?.code ?? undefined };
+  }
+  if (/tavily/.test(signature) && /(api.key|credential|unauthori|invalid.key|authentication)/.test(signature)) {
+    return { title: 'Search credentials rejected', body: 'Check configured search provider credentials, then restart the research service.', code: apiError?.code ?? undefined };
+  }
+  if (/(bedrock|model|anthropic)/.test(signature) && /(api.key|credential|unauthori|invalid.key|authentication)/.test(signature)) {
+    return { title: 'Model credentials rejected', body: 'Check configured model provider credentials, then restart the research service.', code: apiError?.code ?? undefined };
+  }
+  if (/(api.key|credential|unauthori|invalid.key|authentication)/.test(signature)) {
+    return { title: 'Provider credentials rejected', body: 'Check configured model and search provider credentials, then restart the research service.', code: apiError?.code ?? undefined };
+  }
+  if (/(throttl|rate.limit|too.many)/.test(signature) || apiError?.status === 429) {
+    return { title: 'Provider is temporarily busy', body: 'Request limit was reached. Wait a moment, then try again.', code: apiError?.code ?? undefined, retry: retryAction };
+  }
+  if (!apiError || apiError.status >= 500) {
+    return { title: 'Research service unavailable', body: message === 'Failed to fetch' ? 'Could not reach the research service. Check that it is running and try again.' : message, code: apiError?.code ?? undefined, retry: retryAction };
+  }
+  return { title: fallback, body: message, code: apiError.code ?? undefined, retry: retryAction };
+}
+
+function ErrorModal({ close, notice }: { close: () => void; notice: ErrorNotice }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.open) dialog.showModal();
+    return () => { if (dialog?.open) dialog.close(); };
+  }, []);
+  function retry() { close(); notice.retry?.(); }
+  return <dialog aria-describedby="error-description" aria-labelledby="error-title" className="error-modal" onCancel={close} onClick={(event) => { if (event.target === event.currentTarget) close(); }} ref={dialogRef} role="alertdialog">
+    <div className="error-card">
+      <button aria-label="Close error message" className="error-close" onClick={close} type="button">×</button>
+      <span className="error-symbol" aria-hidden="true">!</span>
+      <div className="error-copy"><p>Unable to continue</p><h2 id="error-title">{notice.title}</h2><p id="error-description">{notice.body}</p>{notice.code && <small>Reference: {notice.code}</small>}</div>
+      <div className="error-actions"><button className="secondary" onClick={close} type="button">Close</button>{notice.retry && <button autoFocus onClick={retry} type="button">Try again</button>}</div>
+    </div>
+  </dialog>;
 }
 
 function cleanReport(report: string, evidence: EvidenceClaim[]) {
@@ -107,7 +165,7 @@ export default function Home() {
   const [view, setView] = useState<View>('answer');
   const [drawer, setDrawer] = useState<DrawerSelection | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorNotice | null>(null);
   const [busy, setBusy] = useState(false);
   const [branching, setBranching] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -127,12 +185,12 @@ export default function Home() {
     if (replayingTerminal) void loadDetail(session.id);
     const stream = new EventSource(eventStreamUrl(session.id)); streamRef.current = stream;
     let closedIntentionally = false;
-    stream.onopen = () => setError((value) => value === 'Live connection interrupted. Reconnecting…' ? null : value);
+    stream.onopen = () => setError((value) => value?.code === 'connection_interrupted' ? null : value);
     const consume = (event: MessageEvent) => {
       const key = `${session.id}:${event.lastEventId}`;
       if (seenEventsRef.current.has(key)) return null;
       seenEventsRef.current.add(key);
-      return JSON.parse(event.data) as { message?: string; source_domain?: string; stage?: string; text?: string; status?: SessionStatus; tasks?: SessionSummary['plan']; task_id?: string };
+      return JSON.parse(event.data) as { code?: string; error_code?: string; message?: string; provider?: string; retryable?: boolean; source_domain?: string; stage?: string; text?: string; status?: SessionStatus; tasks?: SessionSummary['plan']; task_id?: string };
     };
     const push = (data: { message?: string; source_domain?: string; stage?: string; task_id?: string }, event: MessageEvent, tone?: Activity['tone']) => {
       if (data.message && activeIdRef.current === session.id) setActivity((items) => [...items, { id: `${session.id}-${event.lastEventId}`, message: data.message!, sourceDomain: data.source_domain, stage: data.stage, taskId: data.task_id, tone }]);
@@ -145,12 +203,12 @@ export default function Home() {
     stream.addEventListener('report.started', (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; if (!replayingTerminal) { updateSession(session.id, { status: 'synthesizing' }); if (activeIdRef.current === session.id) setStreamedReport(''); } push(data, event); });
     stream.addEventListener('report.chunk', (raw) => { const data = consume(raw as MessageEvent); if (!replayingTerminal && data?.text && activeIdRef.current === session.id) setStreamedReport((value) => value + data.text); });
     stream.addEventListener('session.completed', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: data.status ?? 'completed' }); push(data, event, 'done'); closedIntentionally = true; stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
-    stream.addEventListener('session.failed', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: 'failed' }); push(data, event, 'warning'); closedIntentionally = true; stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
-    stream.onerror = () => { if (!replayingTerminal && !closedIntentionally && stream.readyState !== EventSource.CLOSED) setError('Live connection interrupted. Reconnecting…'); };
+    stream.addEventListener('session.failed', async (raw) => { const event = raw as MessageEvent; const data = consume(event); if (!data) return; updateSession(session.id, { status: 'failed' }); push(data, event, 'warning'); setError(errorNotice(new ApiError({ code: data.code ?? data.error_code ?? null, message: data.message ?? 'Research could not complete.', provider: data.provider ?? null, retryable: data.retryable ?? false, status: 0 }), 'Research could not complete')); closedIntentionally = true; stream.close(); await Promise.all([loadDetail(session.id), refreshSessions()]); });
+    stream.onerror = () => { if (!replayingTerminal && !closedIntentionally && stream.readyState !== EventSource.CLOSED) setError({ title: 'Live connection interrupted', body: 'Progress updates are reconnecting automatically. Research continues in the background.', code: 'connection_interrupted', retry: () => connect(session) }); };
   }, [loadDetail, refreshSessions, updateSession]);
 
   useEffect(() => {
-    Promise.all([api.health(), api.sessions()]).then(([health, items]) => { setConfigured(health.configured); setSessions(items); if (items[0]) { activeIdRef.current = items[0].id; setActiveId(items[0].id); connect(items[0]); } }).catch((cause: Error) => setError(`Research service unavailable: ${cause.message}`));
+    Promise.all([api.health(), api.sessions()]).then(([health, items]) => { setConfigured(health.configured); setSessions(items); if (items[0]) { activeIdRef.current = items[0].id; setActiveId(items[0].id); connect(items[0]); } }).catch((cause: unknown) => setError(errorNotice(cause, 'Research service unavailable', () => window.location.reload())));
     return () => streamRef.current?.close();
   }, [connect]);
 
@@ -158,21 +216,24 @@ export default function Home() {
     streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = session.id; setActiveId(session.id); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); connect(session);
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!query.trim() || busy) return; setBusy(true); setError(null);
+    event.preventDefault(); await createPlan();
+  }
+  async function createPlan() {
+    if (!query.trim() || busy) return; setBusy(true); setError(null);
     try { const session = await api.create(query.trim()); setSessions((items) => [session, ...items]); setQuery(''); selectSession(session); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Plan could not be created'); }
+    catch (cause) { setError(errorNotice(cause, 'Plan could not be created', () => void createPlan())); }
     finally { setBusy(false); }
   }
   async function startResearch() {
     if (!active || busy) return; setBusy(true); setError(null); setActivity([]); setStreamedReport('');
     try { const session = await api.start(active.id); updateSession(active.id, { status: session.status }); connect(session); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Research could not start'); }
+    catch (cause) { setError(errorNotice(cause, 'Research could not start', () => void startResearch())); }
     finally { setBusy(false); }
   }
   async function startBranch(observation: Observation) {
     if (!detail || branching) return; setBranching(observation.observation_id); setError(null);
     try { const session = await api.branch(detail.id, observation.observation_id); setSessions((items) => [session, ...items]); setDrawer(null); selectSession(session); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Evidence path could not start'); }
+    catch (cause) { setError(errorNotice(cause, 'Evidence path could not start', () => void startBranch(observation))); }
     finally { setBranching(null); }
   }
   function newResearch() { streamRef.current?.close(); seenEventsRef.current.clear(); activeIdRef.current = null; setActiveId(null); setDetail(null); setActivity([]); setStreamedReport(''); setDrawer(null); setError(null); setSidebarOpen(false); setView('answer'); }
@@ -181,8 +242,9 @@ export default function Home() {
   return <main className="shell">
     <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}><div className="brand"><span className="brand-orbit" aria-hidden="true" /><strong>Parallax</strong></div><button className="new-thread" onClick={newResearch} type="button"><span>＋</span> New research</button><p className="sidebar-label">Your research</p><nav className="history" aria-label="Research history">{orderedSessions.length === 0 && <p className="history-empty">Research sessions will appear here.</p>}{orderedSessions.map(({ session, depth }) => <SessionItem active={activeId === session.id} depth={depth} key={session.id} onClick={() => selectSession(session)} session={session} />)}</nav></aside>
     <button className="mobile-menu" onClick={() => setSidebarOpen((value) => !value)} type="button" aria-label="Toggle research history">☰</button>
-    <section className="main-column">{error && <div className="error-banner" role="alert">{error}<button onClick={() => setError(null)} type="button">Dismiss</button></div>}{!active ? <Welcome query={query} setQuery={setQuery} submit={submit} busy={busy} configured={configured} /> : <ResearchConversation active={active} activity={activity} busy={busy} detail={detail} newResearch={newResearch} openCitation={openCitation} report={renderedReport} setView={setView} startResearch={startResearch} view={view} />}</section>
+    <section className="main-column">{!active ? <Welcome query={query} setQuery={setQuery} submit={submit} busy={busy} configured={configured} /> : <ResearchConversation active={active} activity={activity} busy={busy} detail={detail} newResearch={newResearch} openCitation={openCitation} report={renderedReport} setView={setView} startResearch={startResearch} view={view} />}</section>
     {drawer && <EvidenceDrawer branching={branching} close={() => setDrawer(null)} selection={drawer} startBranch={startBranch} />}
+    {error && <ErrorModal close={() => setError(null)} notice={error} />}
   </main>;
 }
 

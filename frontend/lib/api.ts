@@ -71,6 +71,68 @@ export type SessionDetail = SessionSummary & {
   run: Record<string, unknown> | null;
 };
 
+export type ApiErrorDetails = {
+  code: string | null;
+  message: string;
+  provider: string | null;
+  retryable: boolean;
+  status: number;
+};
+
+export class ApiError extends Error {
+  readonly code: string | null;
+  readonly provider: string | null;
+  readonly retryable: boolean;
+  readonly status: number;
+
+  constructor(details: ApiErrorDetails) {
+    super(details.message);
+    this.name = 'ApiError';
+    this.code = details.code;
+    this.provider = details.provider;
+    this.retryable = details.retryable;
+    this.status = details.status;
+  }
+}
+
+function errorDetails(payload: unknown, status: number): ApiErrorDetails {
+  const root = typeof payload === 'object' && payload !== null
+    ? payload as Record<string, unknown>
+    : {};
+  const nested = typeof root.detail === 'object' && root.detail !== null
+    ? root.detail as Record<string, unknown>
+    : typeof root.error === 'object' && root.error !== null
+      ? root.error as Record<string, unknown>
+      : {};
+  const message = typeof nested.message === 'string'
+    ? nested.message
+    : typeof root.detail === 'string'
+      ? root.detail
+      : typeof root.message === 'string'
+        ? root.message
+        : `Request failed (${status})`;
+  const code = typeof nested.code === 'string'
+    ? nested.code
+    : typeof nested.error_code === 'string'
+      ? nested.error_code
+      : typeof root.code === 'string'
+        ? root.code
+        : typeof root.error_code === 'string' ? root.error_code : null;
+  const provider = typeof nested.provider === 'string'
+    ? nested.provider
+    : typeof root.provider === 'string' ? root.provider : null;
+  const explicitRetryable = typeof nested.retryable === 'boolean'
+    ? nested.retryable
+    : typeof root.retryable === 'boolean' ? root.retryable : null;
+  return {
+    code,
+    message,
+    provider,
+    retryable: explicitRetryable ?? [408, 425, 429, 500, 502, 503, 504].includes(status),
+    status,
+  };
+}
+
 let cachedWorkspaceKey: string | null = null;
 
 export function workspaceKey() {
@@ -105,13 +167,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const payload: unknown = await response.json().catch(() => ({}));
-    const detail = (
-      typeof payload === 'object'
-      && payload !== null
-      && 'detail' in payload
-      && typeof payload.detail === 'string'
-    ) ? payload.detail : null;
-    throw new Error(detail ?? `Request failed (${response.status})`);
+    throw new ApiError(errorDetails(payload, response.status));
   }
   return response.json() as Promise<T>;
 }
