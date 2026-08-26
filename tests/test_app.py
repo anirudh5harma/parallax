@@ -45,6 +45,8 @@ class AppTests(unittest.TestCase):
 
         self.assertEqual("failed", payload["status"])
         self.assertEqual("tavily_quota_exhausted", payload["error_code"])
+        self.assertEqual("tavily", payload["error_provider"])
+        self.assertFalse(payload["error_retryable"])
         self.assertEqual("The Tavily usage limit is exhausted.", payload["error"])
         self.assertNotIn("internal detail", payload["error"])
 

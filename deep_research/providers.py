@@ -182,6 +182,15 @@ def _provider_http_failure(url: str, status: int, detail: str) -> tuple[str, str
     return "provider_unavailable", "A research provider is temporarily unavailable."
 
 
+def provider_error_context(code: str) -> tuple[str | None, bool]:
+    provider = next(
+        (name for name in ("bedrock", "tavily") if code.startswith(f"{name}_")),
+        None,
+    )
+    retryable = code.endswith(("_rate_limited", "_unavailable"))
+    return provider, retryable
+
+
 def _post_json_with_retry(
     url: str,
     payload: dict[str, Any],

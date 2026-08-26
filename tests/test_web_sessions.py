@@ -72,11 +72,14 @@ class ResearchSessionServiceTests(unittest.TestCase):
             session,
             "The Tavily usage limit is exhausted.",
             code="tavily_quota_exhausted",
+            provider="tavily",
         )
 
         summary = session.summary()
         self.assertEqual("failed", summary["status"])
         self.assertEqual("tavily_quota_exhausted", summary["error_code"])
+        self.assertEqual("tavily", summary["error_provider"])
+        self.assertFalse(summary["error_retryable"])
         self.assertEqual("The Tavily usage limit is exhausted.", summary["error"])
         self.assertEqual(
             "tavily_quota_exhausted", session.events[-1]["data"]["error_code"]

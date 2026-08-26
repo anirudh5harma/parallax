@@ -13,6 +13,7 @@ from deep_research.providers import (
     TavilySearchClient,
     _NoRedirectHandler,
     _provider_http_failure,
+    provider_error_context,
 )
 
 
@@ -34,6 +35,8 @@ class BedrockConverseModelTests(unittest.TestCase):
             ("tavily_rate_limited", "Web search is rate-limited. Wait briefly, then retry."),
             _provider_http_failure("https://api.tavily.com/search", 429, ": busy"),
         )
+        self.assertEqual(("tavily", False), provider_error_context("tavily_quota_exhausted"))
+        self.assertEqual(("bedrock", True), provider_error_context("bedrock_rate_limited"))
 
     @staticmethod
     def _simple_response() -> dict[str, object]:

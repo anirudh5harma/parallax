@@ -32,6 +32,9 @@ export type SessionSummary = {
   claim_count: number;
   contested_count: number;
   error: string | null;
+  error_code: string | null;
+  error_provider: string | null;
+  error_retryable: boolean;
   plan: ResearchPlanTask[];
 };
 

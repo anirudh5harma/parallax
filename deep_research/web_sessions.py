@@ -51,6 +51,8 @@ class ResearchSession:
     run: dict[str, Any] | None = None
     error: str | None = None
     error_code: str | None = None
+    error_provider: str | None = None
+    error_retryable: bool = False
     plan: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     next_event_id: int = 0
@@ -67,12 +69,16 @@ class ResearchSession:
         *,
         error: str | None = None,
         error_code: str | None = None,
+        error_provider: str | None = None,
+        error_retryable: bool = False,
     ) -> None:
         if status not in TERMINAL_STATUSES:
             raise ValueError("finish requires a terminal status")
         with self.lock:
             self.error = error
             self.error_code = error_code
+            self.error_provider = error_provider
+            self.error_retryable = error_retryable
             for event, data in events:
                 self._publish_locked(event, data)
             self.status = status
@@ -153,6 +159,8 @@ class ResearchSession:
                 "budget_used": run.get("budget_used"),
                 "error": self.error,
                 "error_code": self.error_code,
+                "error_provider": self.error_provider,
+                "error_retryable": self.error_retryable,
                 "plan": [dict(task) for task in self.plan],
             }
 
@@ -517,6 +525,8 @@ class ResearchSessionService:
                         session,
                         str(payload.get("error", "Research planning could not complete.")),
                         code=str(payload.get("error_code", "provider_unavailable")),
+                        provider=str(payload.get("error_provider") or "") or None,
+                        retryable=bool(payload.get("error_retryable", False)),
                     )
                     return
                 detail = "planner exited without a valid plan"
@@ -627,18 +637,36 @@ class ResearchSessionService:
                 if final_status == "failed"
                 else None
             )
+            final_error_provider = (
+                str(run.get("error_provider") or "") or None
+                if final_status == "failed"
+                else None
+            )
+            final_error_retryable = bool(run.get("error_retryable", False))
             with session.lock:
                 session.run = run
                 session.ledger = ledger
                 session.report = report
                 session.error = final_error
                 session.error_code = final_error_code
+                session.error_provider = final_error_provider
+                session.error_retryable = final_error_retryable
             if final_status == "failed":
                 session.finish(
                     "failed",
-                    [("session.failed", {"message": final_error or "Research failed"})],
+                    [(
+                        "session.failed",
+                        {
+                            "message": final_error or "Research failed",
+                            "error_code": final_error_code,
+                            "provider": final_error_provider,
+                            "retryable": final_error_retryable,
+                        },
+                    )],
                     error=final_error,
                     error_code=final_error_code,
+                    error_provider=final_error_provider,
+                    error_retryable=final_error_retryable,
                 )
                 return
             with session.lock:
@@ -709,14 +737,26 @@ class ResearchSessionService:
         message: str,
         *,
         code: str = "research_failed",
+        provider: str | None = None,
+        retryable: bool = False,
     ) -> None:
         safe_message = " ".join(message.split())[:500]
         safe_code = re.sub(r"[^a-z0-9_]", "", code.casefold())[:64] or "research_failed"
         session.finish(
             "failed",
-            [("session.failed", {"message": safe_message, "error_code": safe_code})],
+            [(
+                "session.failed",
+                {
+                    "message": safe_message,
+                    "error_code": safe_code,
+                    "provider": provider,
+                    "retryable": retryable,
+                },
+            )],
             error=safe_message,
             error_code=safe_code,
+            error_provider=provider,
+            error_retryable=retryable,
         )
 
     def shutdown(self) -> None:

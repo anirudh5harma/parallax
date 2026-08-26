@@ -20,6 +20,7 @@ from .providers import (
     ProviderError,
     SearchClient,
     StructuredModel,
+    provider_error_context,
 )
 from .researcher import FetchGate, Researcher
 from .urls import UrlRegistry
@@ -112,6 +113,9 @@ def run_query(
                 if failure is not None
                 else "research_failed"
             )
+            provider, retryable = provider_error_context(run_record["error_code"])
+            run_record["error_provider"] = provider
+            run_record["error_retryable"] = retryable
         _write_json_atomic(run_path, run_record)
         audit.log(
             "run.completed" if status != "failed" else "run.failed",
@@ -135,6 +139,7 @@ def run_query(
             exc.public_message if isinstance(exc, ProviderError) else "Research could not complete."
         )
         error_code = exc.code if isinstance(exc, ProviderError) else "research_failed"
+        error_provider, error_retryable = provider_error_context(error_code)
         _write_json_atomic(
             ledger_path,
             ledger.dump(),
@@ -149,6 +154,8 @@ def run_query(
                 "error_type": type(exc).__name__,
                 "error": public_error,
                 "error_code": error_code,
+                "error_provider": error_provider,
+                "error_retryable": error_retryable,
             },
         )
         raise
@@ -196,6 +203,7 @@ def create_plan(
         )
         return []
     except ProviderError as exc:
+        provider, retryable = provider_error_context(exc.code)
         _write_json_atomic(
             output_path,
             {
@@ -203,6 +211,8 @@ def create_plan(
                 "status": "failed",
                 "error": exc.public_message,
                 "error_code": exc.code,
+                "error_provider": provider,
+                "error_retryable": retryable,
                 "tasks": [],
             },
         )
